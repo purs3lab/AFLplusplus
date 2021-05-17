@@ -267,6 +267,10 @@ inline u8 has_new_bits_unclassified(afl_state_t *afl, u8 *virgin_map) {
   /* Handle the hot path first: no new coverage */
   u8 *end = afl->fsrv.trace_bits + afl->fsrv.map_size;
 
+  if (*(u64*)afl->fsrv.trace_bits == 0xdeadbeef) {
+    return 2;
+  }
+
 #ifdef WORD_SIZE_64
 
   if (!skim((u64 *)virgin_map, (u64 *)afl->fsrv.trace_bits, (u64 *)end))

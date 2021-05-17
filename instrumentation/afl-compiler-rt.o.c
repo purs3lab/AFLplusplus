@@ -31,6 +31,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <limits.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <errno.h>
 
 #include <sys/mman.h>
@@ -1988,5 +1990,19 @@ void __afl_coverage_interesting(u8 val, u32 id) {
 
   __afl_area_ptr[id] = val;
 
+}
+
+// This will mark the current input as interesting.
+void mark_the_current_input_interesting() {
+  *(u64*)__afl_area_ptr = 0xdeadbeef;
+    /*char *p = NULL;
+    int randfd = open("/dev/urandom", O_RDONLY);
+    if (randfd >= 0) {
+        read(randfd, (char*)__afl_area_ptr, __afl_map_size);
+        close(randfd);
+    } else {
+      // Simulate crash
+      *p = 0;
+    }*/
 }
 
