@@ -469,7 +469,7 @@ save_if_interesting(afl_state_t *afl, void *mem, u32 len, u8 fault) {
   u8  keeping = 0, res, classified = 0;
   u64 cksum = 0;
 
-  u8 fn[PATH_MAX];
+  u8 fn[PATH_MAX], tmpfn[PATH_MAX];
 
   /* Update path frequency. */
 
@@ -727,6 +727,35 @@ save_if_interesting(afl_state_t *afl, void *mem, u32 len, u8 fault) {
                afl->unique_crashes, afl->last_kill_signal);
 
 #endif                                                    /* ^!SIMPLE_FILES */
+    
+    // Check if there are any custom mutators!? If yes, call mutators
+    // post process and write the post-processed output.
+    if (unlikely(afl->custom_mutators_count)) {
+
+        ssize_t new_size = len;
+        u8 *    new_buf = NULL;
+
+        LIST_FOREACH(&afl->custom_mutator_list, struct custom_mutator, {
+
+          if (el->afl_custom_post_process) {
+
+            new_buf = NULL;
+
+            new_size =
+                el->afl_custom_post_process(el->data, mem, len, &new_buf);
+            
+            if (new_buf != NULL) {
+              snprintf(tmpfn, PATH_MAX, "%s.mutator.%s", fn, el->name);
+              fd = open(tmpfn, O_WRONLY | O_CREAT | O_EXCL, DEFAULT_PERMISSION);
+              if (unlikely(fd < 0)) { PFATAL("Unable to create '%s'", fn); }
+              ck_write(fd, new_buf, new_size, tmpfn);
+              close(fd);
+            }
+
+          }
+
+        });
+    }
 
       ++afl->unique_crashes;
 #ifdef INTROSPECTION
