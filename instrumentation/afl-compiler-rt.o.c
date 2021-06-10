@@ -2006,3 +2006,7 @@ void mark_the_current_input_interesting() {
     }*/
 }
 
+void mark_the_current_input_uninteresting() {
+  *(u64*)__afl_area_ptr = 0;
+}
+
