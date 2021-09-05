@@ -449,7 +449,23 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
   }
 
   q->exec_us = diff_us / afl->stage_max;
-  q->bitmap_size = count_bytes(afl, afl->fsrv.trace_bits);
+  {
+    int handled = 0;
+    // If this is our custom 
+    if (*(u64*)afl->fsrv.trace_bits == 0xdeadbeef) {
+      // If the next 8 bytes have something!? use it.
+      if (*((u64*)afl->fsrv.trace_bits + 1)) {
+        q->bitmap_size = *((u64*)afl->fsrv.trace_bits + 1);
+        // Set the weight of this test case.
+        q->lrm_weight = *((u64*)afl->fsrv.trace_bits + 1);
+        handled = 1;
+      }
+    }
+    // If this is not handled!?
+    if (!handled) {
+      q->bitmap_size = count_bytes(afl, afl->fsrv.trace_bits);
+    }
+  }
   q->handicap = handicap;
   q->cal_failed = 0;
 

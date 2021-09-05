@@ -70,6 +70,7 @@ void create_alias_table(afl_state_t *afl) {
 
   u32    n = afl->queued_paths, i = 0, a, g;
   double sum = 0;
+  double l_sum = 0;
 
   afl->alias_table =
       (u32 *)afl_realloc((void **)&afl->alias_table, n * sizeof(u32));
@@ -125,7 +126,7 @@ void create_alias_table(afl_state_t *afl) {
             compute_weight(afl, q, avg_exec_us, avg_bitmap_size, avg_top_size);
         q->perf_score = calculate_score(afl, q);
         sum += q->weight;
-
+        l_sum += q->lrm_weight;
       }
 
     }
@@ -133,7 +134,8 @@ void create_alias_table(afl_state_t *afl) {
     for (i = 0; i < n; i++) {
 
       // weight is always 0 for disabled entries
-      P[i] = (afl->queue_buf[i]->weight * n) / sum;
+      // P[i] = (afl->queue_buf[i]->weight * n) / sum;
+      P[i] = (afl->queue_buf[i]->lrm_weight * n) / l_sum;
 
     }
 
@@ -146,13 +148,15 @@ void create_alias_table(afl_state_t *afl) {
       if (likely(!q->disabled)) { q->perf_score = calculate_score(afl, q); }
 
       sum += q->perf_score;
+      l_sum += q->lrm_weight;
 
     }
 
     for (i = 0; i < n; i++) {
 
       // perf_score is always 0 for disabled entries
-      P[i] = (afl->queue_buf[i]->perf_score * n) / sum;
+      // P[i] = (afl->queue_buf[i]->perf_score * n) / sum;
+      P[i] = (afl->queue_buf[i]->lrm_weight * n) / l_sum;
 
     }
 
@@ -706,7 +710,8 @@ void cull_queue(afl_state_t *afl) {
 
     if (likely(!afl->queue_buf[i]->disabled)) {
 
-      mark_as_redundant(afl, afl->queue_buf[i], !afl->queue_buf[i]->favored);
+      // No need to mark an input as redundant => every input is interesting.
+      //mark_as_redundant(afl, afl->queue_buf[i], !afl->queue_buf[i]->favored);
 
     }
 
