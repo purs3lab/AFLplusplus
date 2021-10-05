@@ -181,7 +181,7 @@ struct queue_entry {
   u32 tc_ref;                           /* Trace bytes ref count            */
 
   // LLVrandoM: Additional information for each test case.
-  float lrm_weight;
+  double lrm_weight;
 
 #ifdef INTROSPECTION
   u32 bitsmap_size;
