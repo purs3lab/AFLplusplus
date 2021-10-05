@@ -2007,8 +2007,8 @@ void mark_the_current_input_interesting() {
 }
 
 // Set the weight for the current input.
-void set_input_weight(size_t weight) {
-  *((u64*)__afl_area_ptr + 1) = weight;
+void set_input_weight(float weight) {
+  *((float *)((u64*)__afl_area_ptr + 1)) = weight;
 }
 
 void mark_the_current_input_uninteresting() {

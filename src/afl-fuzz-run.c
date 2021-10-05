@@ -457,7 +457,7 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
       if (*((u64*)afl->fsrv.trace_bits + 1)) {
         q->bitmap_size = *((u64*)afl->fsrv.trace_bits + 1);
         // Set the weight of this test case.
-        q->lrm_weight = *((u64*)afl->fsrv.trace_bits + 1);
+        q->lrm_weight = *(float *)((u64*)afl->fsrv.trace_bits + 1);
         handled = 1;
       }
     }
