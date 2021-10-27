@@ -120,7 +120,8 @@ write_to_testcase(afl_state_t *afl, void *mem, u32 len) {
     } else if (likely(new_buf)) {
 
       /* everything as planned. use the new data. */
-      afl_fsrv_write_to_testcase(&afl->fsrv, new_buf, new_size);
+      // afl_fsrv_write_to_testcase(&afl->fsrv, new_buf, new_size);
+      /* We do not write to testcase here because custom post-processor already does */
 
     } else {
 
@@ -257,7 +258,7 @@ static void write_with_gap(afl_state_t *afl, u8 *mem, u32 len, u32 skip_at,
 
     }
 
-    if (fd < 0) { PFATAL("Unable to create '%s'", afl->fsrv.out_file); }
+    if (fd < 0) { /*PFATAL("Unable to create '%s'", afl->fsrv.out_file);*/ return; }
 
   } else {
 
