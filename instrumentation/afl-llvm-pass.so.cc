@@ -12,13 +12,13 @@
    NGRAM previous location coverage comes from Adrian Herrera.
 
    Copyright 2015, 2016 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
    This library is plugged into LLVM when invoking clang through afl-clang-fast.
    It tells the compiler to add code roughly equivalent to the bits discussed
@@ -44,15 +44,24 @@
 typedef long double max_align_t;
 #endif
 
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Pass.h"
+#if LLVM_VERSION_MAJOR >= 11                        /* use new pass manager */
+  #include "llvm/Passes/PassPlugin.h"
+  #include "llvm/Passes/PassBuilder.h"
+  #include "llvm/IR/PassManager.h"
+#else
+  #include "llvm/IR/LegacyPassManager.h"
+  #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#endif
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#if LLVM_VERSION_MAJOR >= 14                /* how about stable interfaces? */
+  #include "llvm/Passes/OptimizationLevel.h"
+#endif
 
-#if LLVM_VERSION_MAJOR > 3 || \
+#if LLVM_VERSION_MAJOR >= 4 || \
     (LLVM_VERSION_MAJOR == 3 && LLVM_VERSION_MINOR > 4)
   #include "llvm/IR/DebugInfo.h"
   #include "llvm/IR/CFG.h"
@@ -61,6 +70,8 @@ typedef long double max_align_t;
   #include "llvm/Support/CFG.h"
 #endif
 
+#include "llvm/IR/IRBuilder.h"
+
 #include "afl-llvm-common.h"
 #include "llvm-alternative-coverage.h"
 
@@ -68,30 +79,92 @@ using namespace llvm;
 
 namespace {
 
+#if LLVM_VERSION_MAJOR >= 11                        /* use new pass manager */
+class AFLCoverage : public PassInfoMixin<AFLCoverage> {
+
+ public:
+  AFLCoverage() {
+
+#else
 class AFLCoverage : public ModulePass {
 
  public:
   static char ID;
   AFLCoverage() : ModulePass(ID) {
 
+#endif
+
     initInstrumentList();
 
   }
 
+#if LLVM_VERSION_MAJOR >= 11                        /* use new pass manager */
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
+#else
   bool runOnModule(Module &M) override;
+#endif
 
  protected:
-  uint32_t ngram_size = 0;
-  uint32_t ctx_k = 0;
-  uint32_t map_size = MAP_SIZE;
-  uint32_t function_minimum_size = 1;
-  char *   ctx_str = NULL, *caller_str = NULL, *skip_nozero = NULL;
+  uint32_t    ngram_size = 0;
+  uint32_t    ctx_k = 0;
+  uint32_t    map_size = MAP_SIZE;
+  uint32_t    function_minimum_size = 1;
+  const char *ctx_str = NULL, *caller_str = NULL, *skip_nozero = NULL;
+  const char *use_threadsafe_counters = nullptr;
 
 };
 
 }  // namespace
 
+#if LLVM_VERSION_MAJOR >= 11                        /* use new pass manager */
+extern "C" ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
+llvmGetPassPluginInfo() {
+
+  return {LLVM_PLUGIN_API_VERSION, "AFLCoverage", "v0.1",
+          /* lambda to insert our pass into the pass pipeline. */
+          [](PassBuilder &PB) {
+
+  #if 1
+    #if LLVM_VERSION_MAJOR <= 13
+            using OptimizationLevel = typename PassBuilder::OptimizationLevel;
+    #endif
+            PB.registerOptimizerLastEPCallback(
+                [](ModulePassManager &MPM, OptimizationLevel OL) {
+
+                  MPM.addPass(AFLCoverage());
+
+                });
+
+  /* TODO LTO registration */
+  #else
+            using PipelineElement = typename PassBuilder::PipelineElement;
+            PB.registerPipelineParsingCallback([](StringRef          Name,
+                                                  ModulePassManager &MPM,
+                                                  ArrayRef<PipelineElement>) {
+
+              if (Name == "AFLCoverage") {
+
+                MPM.addPass(AFLCoverage());
+                return true;
+
+              } else {
+
+                return false;
+
+              }
+
+            });
+
+  #endif
+
+          }};
+
+}
+
+#else
+
 char AFLCoverage::ID = 0;
+#endif
 
 /* needed up to 3.9.0 */
 #if LLVM_VERSION_MAJOR == 3 && \
@@ -113,11 +186,18 @@ uint64_t PowerOf2Ceil(unsigned in) {
 #endif
 
 /* #if LLVM_VERSION_STRING >= "4.0.1" */
-#if LLVM_VERSION_MAJOR > 4 || \
+#if LLVM_VERSION_MAJOR >= 5 || \
     (LLVM_VERSION_MAJOR == 4 && LLVM_VERSION_PATCH >= 1)
   #define AFL_HAVE_VECTOR_INTRINSICS 1
 #endif
+
+#if LLVM_VERSION_MAJOR >= 11                        /* use new pass manager */
+PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &MAM) {
+
+#else
 bool AFLCoverage::runOnModule(Module &M) {
+
+#endif
 
   LLVMContext &C = M.getContext();
 
@@ -131,6 +211,10 @@ bool AFLCoverage::runOnModule(Module &M) {
   struct timezone tz;
   u32             rand_seed;
   unsigned int    cur_loc = 0;
+
+#if LLVM_VERSION_MAJOR >= 11                        /* use new pass manager */
+  auto PA = PreservedAnalyses::all();
+#endif
 
   /* Setup random() so we get Actually Random(TM) outputs from AFL_R() */
   gettimeofday(&tv, &tz);
@@ -167,7 +251,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   /* Decide instrumentation ratio */
 
-  char *       inst_ratio_str = getenv("AFL_INST_RATIO");
+  char        *inst_ratio_str = getenv("AFL_INST_RATIO");
   unsigned int inst_ratio = 100;
 
   if (inst_ratio_str) {
@@ -182,6 +266,38 @@ bool AFLCoverage::runOnModule(Module &M) {
   char *neverZero_counters_str = getenv("AFL_LLVM_NOT_ZERO");
 #endif
   skip_nozero = getenv("AFL_LLVM_SKIP_NEVERZERO");
+  use_threadsafe_counters = getenv("AFL_LLVM_THREADSAFE_INST");
+
+  if ((isatty(2) && !getenv("AFL_QUIET")) || !!getenv("AFL_DEBUG")) {
+
+    if (use_threadsafe_counters) {
+
+      // disabled unless there is support for other modules as well
+      // (increases documentation complexity)
+      /*      if (!getenv("AFL_LLVM_NOT_ZERO")) { */
+
+      skip_nozero = "1";
+      SAYF(cCYA "afl-llvm-pass" VERSION cRST " using thread safe counters\n");
+
+      /*
+
+            } else {
+
+              SAYF(cCYA "afl-llvm-pass" VERSION cRST
+                        " using thread safe not-zero-counters\n");
+
+            }
+
+      */
+
+    } else {
+
+      SAYF(cCYA "afl-llvm-pass" VERSION cRST
+                " using non-thread safe instrumentation\n");
+
+    }
+
+  }
 
   unsigned PrevLocSize = 0;
   unsigned PrevCallerSize = 0;
@@ -370,7 +486,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   Constant *PrevLocShuffleMask = ConstantVector::get(PrevLocShuffle);
 
-  Constant *                  PrevCallerShuffleMask = NULL;
+  Constant                   *PrevCallerShuffleMask = NULL;
   SmallVector<Constant *, 32> PrevCallerShuffle = {UndefValue::get(Int32Ty)};
 
   if (ctx_k) {
@@ -388,10 +504,9 @@ bool AFLCoverage::runOnModule(Module &M) {
 #endif
 
   // other constants we need
-  ConstantInt *Zero = ConstantInt::get(Int8Ty, 0);
   ConstantInt *One = ConstantInt::get(Int8Ty, 1);
 
-  Value *   PrevCtx = NULL;     // CTX sensitive coverage
+  Value    *PrevCtx = NULL;     // CTX sensitive coverage
   LoadInst *PrevCaller = NULL;  // K-CTX coverage
 
   /* Instrument all the things! */
@@ -406,10 +521,11 @@ bool AFLCoverage::runOnModule(Module &M) {
       fprintf(stderr, "FUNCTION: %s (%zu)\n", F.getName().str().c_str(),
               F.size());
 
-    if (!isInInstrumentList(&F)) continue;
+    if (!isInInstrumentList(&F, MNAME)) { continue; }
 
-    if (F.size() < function_minimum_size) continue;
+    if (F.size() < function_minimum_size) { continue; }
 
+    std::list<Value *> todo;
     for (auto &BB : F) {
 
       BasicBlock::iterator IP = BB.getFirstInsertionPt();
@@ -421,7 +537,11 @@ bool AFLCoverage::runOnModule(Module &M) {
 #ifdef AFL_HAVE_VECTOR_INTRINSICS
         if (ctx_k) {
 
-          PrevCaller = IRB.CreateLoad(AFLPrevCaller);
+          PrevCaller = IRB.CreateLoad(
+  #if LLVM_VERSION_MAJOR >= 14
+              PrevCallerTy,
+  #endif
+              AFLPrevCaller);
           PrevCaller->setMetadata(M.getMDKindID("nosanitize"),
                                   MDNode::get(C, None));
           PrevCtx =
@@ -434,7 +554,11 @@ bool AFLCoverage::runOnModule(Module &M) {
 
           // load the context ID of the previous function and write to to a
           // local variable on the stack
-          LoadInst *PrevCtxLoad = IRB.CreateLoad(AFLContext);
+          LoadInst *PrevCtxLoad = IRB.CreateLoad(
+#if LLVM_VERSION_MAJOR >= 14
+              IRB.getInt32Ty(),
+#endif
+              AFLContext);
           PrevCtxLoad->setMetadata(M.getMDKindID("nosanitize"),
                                    MDNode::get(C, None));
           PrevCtx = PrevCtxLoad;
@@ -587,7 +711,26 @@ bool AFLCoverage::runOnModule(Module &M) {
 
       /* Load prev_loc */
 
-      LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
+      LoadInst *PrevLoc;
+
+      if (ngram_size) {
+
+        PrevLoc = IRB.CreateLoad(
+#if LLVM_VERSION_MAJOR >= 14
+            PrevLocTy,
+#endif
+            AFLPrevLoc);
+
+      } else {
+
+        PrevLoc = IRB.CreateLoad(
+#if LLVM_VERSION_MAJOR >= 14
+            IRB.getInt32Ty(),
+#endif
+            AFLPrevLoc);
+
+      }
+
       PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       Value *PrevLocTrans;
 
@@ -611,54 +754,84 @@ bool AFLCoverage::runOnModule(Module &M) {
 
       /* Load SHM pointer */
 
-      LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
+      LoadInst *MapPtr = IRB.CreateLoad(
+#if LLVM_VERSION_MAJOR >= 14
+          PointerType::get(Int8Ty, 0),
+#endif
+          AFLMapPtr);
       MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
       Value *MapPtrIdx;
 #ifdef AFL_HAVE_VECTOR_INTRINSICS
       if (ngram_size)
         MapPtrIdx = IRB.CreateGEP(
-            MapPtr,
+            Int8Ty, MapPtr,
             IRB.CreateZExt(
                 IRB.CreateXor(PrevLocTrans, IRB.CreateZExt(CurLoc, Int32Ty)),
                 Int32Ty));
       else
 #endif
-        MapPtrIdx = IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocTrans, CurLoc));
+        MapPtrIdx = IRB.CreateGEP(
+#if LLVM_VERSION_MAJOR >= 14
+            Int8Ty,
+#endif
+            MapPtr, IRB.CreateXor(PrevLocTrans, CurLoc));
 
       /* Update bitmap */
 
-      LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
-      Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      if (use_threadsafe_counters) {                              /* Atomic */
 
-      Value *Incr = IRB.CreateAdd(Counter, One);
+        IRB.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::Add, MapPtrIdx, One,
+#if LLVM_VERSION_MAJOR >= 13
+                            llvm::MaybeAlign(1),
+#endif
+                            llvm::AtomicOrdering::Monotonic);
+        /*
 
-#if LLVM_VERSION_MAJOR < 9
-      if (neverZero_counters_str !=
-          NULL) {  // with llvm 9 we make this the default as the bug in llvm is
-                   // then fixed
+                }
+
+        */
+
+      } else {
+
+        LoadInst *Counter = IRB.CreateLoad(
+#if LLVM_VERSION_MAJOR >= 14
+            IRB.getInt8Ty(),
+#endif
+            MapPtrIdx);
+        Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+        Value *Incr = IRB.CreateAdd(Counter, One);
+
+#if LLVM_VERSION_MAJOR >= 9
+        if (!skip_nozero) {
+
 #else
-      if (!skip_nozero) {
+        if (neverZero_counters_str != NULL) {
 
 #endif
-        /* hexcoder: Realize a counter that skips zero during overflow.
-         * Once this counter reaches its maximum value, it next increments to 1
-         *
-         * Instead of
-         * Counter + 1 -> Counter
-         * we inject now this
-         * Counter + 1 -> {Counter, OverflowFlag}
-         * Counter + OverflowFlag -> Counter
-         */
+          /* hexcoder: Realize a counter that skips zero during overflow.
+           * Once this counter reaches its maximum value, it next increments to
+           * 1
+           *
+           * Instead of
+           * Counter + 1 -> Counter
+           * we inject now this
+           * Counter + 1 -> {Counter, OverflowFlag}
+           * Counter + OverflowFlag -> Counter
+           */
 
-        auto cf = IRB.CreateICmpEQ(Incr, Zero);
-        auto carry = IRB.CreateZExt(cf, Int8Ty);
-        Incr = IRB.CreateAdd(Incr, carry);
+          ConstantInt *Zero = ConstantInt::get(Int8Ty, 0);
+          auto         cf = IRB.CreateICmpEQ(Incr, Zero);
+          auto         carry = IRB.CreateZExt(cf, Int8Ty);
+          Incr = IRB.CreateAdd(Incr, carry);
 
-      }
+        }
 
-      IRB.CreateStore(Incr, MapPtrIdx)
-          ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+        IRB.CreateStore(Incr, MapPtrIdx)
+            ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+      }                                                  /* non atomic case */
 
       /* Update prev_loc history vector (by placing cur_loc at the head of the
          vector and shuffle the other elements back by one) */
@@ -714,6 +887,124 @@ bool AFLCoverage::runOnModule(Module &M) {
       inst_blocks++;
 
     }
+
+#if 0
+    if (use_threadsafe_counters) {                       /*Atomic NeverZero */
+      // handle the list of registered blocks to instrument
+      for (auto val : todo) {
+
+        /* hexcoder: Realize a thread-safe counter that skips zero during
+         * overflow. Once this counter reaches its maximum value, it next
+         * increments to 1
+         *
+         * Instead of
+         * Counter + 1 -> Counter
+         * we inject now this
+         * Counter + 1 -> {Counter, OverflowFlag}
+         * Counter + OverflowFlag -> Counter
+         */
+
+        /* equivalent c code looks like this
+         * Thanks to
+         https://preshing.com/20150402/you-can-do-any-kind-of-atomic-read-modify-write-operation/
+
+            int old = atomic_load_explicit(&Counter, memory_order_relaxed);
+            int new;
+            do {
+
+                 if (old == 255) {
+
+                   new = 1;
+
+                 } else {
+
+                   new = old + 1;
+
+                 }
+
+            } while (!atomic_compare_exchange_weak_explicit(&Counter, &old, new,
+
+         memory_order_relaxed, memory_order_relaxed));
+
+         */
+
+        Value *              MapPtrIdx = val;
+        Instruction *        MapPtrIdxInst = cast<Instruction>(val);
+        BasicBlock::iterator it0(&(*MapPtrIdxInst));
+        ++it0;
+        IRBuilder<> IRB(&(*it0));
+
+        // load the old counter value atomically
+        LoadInst *Counter = IRB.CreateLoad(
+  #if LLVM_VERSION_MAJOR >= 14
+        IRB.getInt8Ty(),
+  #endif
+        MapPtrIdx);
+        Counter->setAlignment(llvm::Align());
+        Counter->setAtomic(llvm::AtomicOrdering::Monotonic);
+        Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+        BasicBlock *BB = IRB.GetInsertBlock();
+        // insert a basic block with the corpus of a do while loop
+        // the calculation may need to repeat, if atomic compare_exchange is not
+        // successful
+
+        BasicBlock::iterator it(*Counter);
+        it++;  // split after load counter
+        BasicBlock *end_bb = BB->splitBasicBlock(it);
+        end_bb->setName("injected");
+
+        // insert the block before the second half of the split
+        BasicBlock *do_while_bb =
+            BasicBlock::Create(C, "injected", end_bb->getParent(), end_bb);
+
+        // set terminator of BB from target end_bb to target do_while_bb
+        auto term = BB->getTerminator();
+        BranchInst::Create(do_while_bb, BB);
+        term->eraseFromParent();
+
+        // continue to fill instructions into the do_while loop
+        IRB.SetInsertPoint(do_while_bb, do_while_bb->getFirstInsertionPt());
+
+        PHINode *PN = IRB.CreatePHI(Int8Ty, 2);
+
+        // compare with maximum value 0xff
+        auto *Cmp = IRB.CreateICmpEQ(Counter, ConstantInt::get(Int8Ty, -1));
+
+        // increment the counter
+        Value *Incr = IRB.CreateAdd(Counter, One);
+
+        // select the counter value or 1
+        auto *Select = IRB.CreateSelect(Cmp, One, Incr);
+
+        // try to save back the new counter value
+        auto *CmpXchg = IRB.CreateAtomicCmpXchg(
+            MapPtrIdx, PN, Select, llvm::AtomicOrdering::Monotonic,
+            llvm::AtomicOrdering::Monotonic);
+        CmpXchg->setAlignment(llvm::Align());
+        CmpXchg->setWeak(true);
+        CmpXchg->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+        // get the result of trying to update the Counter
+        Value *Success =
+            IRB.CreateExtractValue(CmpXchg, ArrayRef<unsigned>({1}));
+        // get the (possibly updated) value of Counter
+        Value *OldVal =
+            IRB.CreateExtractValue(CmpXchg, ArrayRef<unsigned>({0}));
+
+        // initially we use Counter
+        PN->addIncoming(Counter, BB);
+        // on retry, we use the updated value
+        PN->addIncoming(OldVal, do_while_bb);
+
+        // if the cmpXchg was not successful, retry
+        IRB.CreateCondBr(Success, end_bb, do_while_bb);
+
+      }
+
+    }
+
+#endif
 
   }
 
@@ -775,11 +1066,12 @@ bool AFLCoverage::runOnModule(Module &M) {
     else {
 
       char modeline[100];
-      snprintf(modeline, sizeof(modeline), "%s%s%s%s%s",
+      snprintf(modeline, sizeof(modeline), "%s%s%s%s%s%s",
                getenv("AFL_HARDEN") ? "hardened" : "non-hardened",
                getenv("AFL_USE_ASAN") ? ", ASAN" : "",
                getenv("AFL_USE_MSAN") ? ", MSAN" : "",
                getenv("AFL_USE_CFISAN") ? ", CFISAN" : "",
+               getenv("AFL_USE_TSAN") ? ", TSAN" : "",
                getenv("AFL_USE_UBSAN") ? ", UBSAN" : "");
       OKF("Instrumented %d locations (%s mode, ratio %u%%).", inst_blocks,
           modeline, inst_ratio);
@@ -788,10 +1080,15 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   }
 
+#if LLVM_VERSION_MAJOR >= 11                        /* use new pass manager */
+  return PA;
+#else
   return true;
+#endif
 
 }
 
+#if LLVM_VERSION_MAJOR < 11                         /* use old pass manager */
 static void registerAFLPass(const PassManagerBuilder &,
                             legacy::PassManagerBase &PM) {
 
@@ -804,4 +1101,5 @@ static RegisterStandardPasses RegisterAFLPass(
 
 static RegisterStandardPasses RegisterAFLPass0(
     PassManagerBuilder::EP_EnabledOnOptLevel0, registerAFLPass);
+#endif
 

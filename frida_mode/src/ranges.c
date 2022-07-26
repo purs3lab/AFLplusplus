@@ -1,6 +1,4 @@
-#include "frida-gum.h"
-
-#include "debug.h"
+#include "frida-gumjs.h"
 
 #include "lib.h"
 #include "ranges.h"
@@ -11,17 +9,22 @@
 
 typedef struct {
 
-  gchar *         suffix;
+  gchar          *suffix;
   GumMemoryRange *range;
   gboolean        done;
 
 } convert_name_ctx_t;
 
-GArray *module_ranges = NULL;
-GArray *libs_ranges = NULL;
-GArray *include_ranges = NULL;
-GArray *exclude_ranges = NULL;
-GArray *ranges = NULL;
+gboolean ranges_debug_maps = FALSE;
+gboolean ranges_inst_libs = FALSE;
+gboolean ranges_inst_jit = FALSE;
+
+static GArray *module_ranges = NULL;
+static GArray *libs_ranges = NULL;
+static GArray *jit_ranges = NULL;
+static GArray *include_ranges = NULL;
+static GArray *exclude_ranges = NULL;
+static GArray *ranges = NULL;
 
 static void convert_address_token(gchar *token, GumMemoryRange *range) {
 
@@ -32,8 +35,8 @@ static void convert_address_token(gchar *token, GumMemoryRange *range) {
 
   if (token_count != 2) {
 
-    FATAL("Invalid range (should have two addresses seperated by a '-'): %s\n",
-          token);
+    FFATAL("Invalid range (should have two addresses seperated by a '-'): %s\n",
+           token);
 
   }
 
@@ -42,15 +45,15 @@ static void convert_address_token(gchar *token, GumMemoryRange *range) {
 
   if (!g_str_has_prefix(from_str, "0x")) {
 
-    FATAL("Invalid range: %s - Start address should have 0x prefix: %s\n",
-          token, from_str);
+    FFATAL("Invalid range: %s - Start address should have 0x prefix: %s\n",
+           token, from_str);
 
   }
 
   if (!g_str_has_prefix(to_str, "0x")) {
 
-    FATAL("Invalid range: %s - End address should have 0x prefix: %s\n", token,
-          to_str);
+    FFATAL("Invalid range: %s - End address should have 0x prefix: %s\n", token,
+           to_str);
 
   }
 
@@ -61,8 +64,8 @@ static void convert_address_token(gchar *token, GumMemoryRange *range) {
 
     if (!g_ascii_isxdigit(*c)) {
 
-      FATAL("Invalid range: %s - Start address not formed of hex digits: %s\n",
-            token, from_str);
+      FFATAL("Invalid range: %s - Start address not formed of hex digits: %s\n",
+             token, from_str);
 
     }
 
@@ -72,8 +75,8 @@ static void convert_address_token(gchar *token, GumMemoryRange *range) {
 
     if (!g_ascii_isxdigit(*c)) {
 
-      FATAL("Invalid range: %s - End address not formed of hex digits: %s\n",
-            token, to_str);
+      FFATAL("Invalid range: %s - End address not formed of hex digits: %s\n",
+             token, to_str);
 
     }
 
@@ -82,24 +85,25 @@ static void convert_address_token(gchar *token, GumMemoryRange *range) {
   guint64 from = g_ascii_strtoull(from_str, NULL, 16);
   if (from == 0) {
 
-    FATAL("Invalid range: %s - Start failed hex conversion: %s\n", token,
-          from_str);
+    FFATAL("Invalid range: %s - Start failed hex conversion: %s\n", token,
+           from_str);
 
   }
 
   guint64 to = g_ascii_strtoull(to_str, NULL, 16);
   if (to == 0) {
 
-    FATAL("Invalid range: %s - End failed hex conversion: %s\n", token, to_str);
+    FFATAL("Invalid range: %s - End failed hex conversion: %s\n", token,
+           to_str);
 
   }
 
   if (from >= to) {
 
-    FATAL("Invalid range: %s - Start (0x%016" G_GINT64_MODIFIER
-          "x) must be less than end "
-          "(0x%016" G_GINT64_MODIFIER "x)\n",
-          token, from, to);
+    FFATAL("Invalid range: %s - Start (0x%016" G_GINT64_MODIFIER
+           "x) must be less than end "
+           "(0x%016" G_GINT64_MODIFIER "x)\n",
+           token, from, to);
 
   }
 
@@ -118,10 +122,10 @@ static gboolean convert_name_token_for_module(const GumModuleDetails *details,
 
   if (!g_str_has_suffix(details->path, ctx->suffix)) { return true; };
 
-  OKF("Found module - prefix: %s, 0x%016" G_GINT64_MODIFIER
-      "x-0x%016" G_GINT64_MODIFIER "x %s",
-      ctx->suffix, details->range->base_address,
-      details->range->base_address + details->range->size, details->path);
+  FVERBOSE("Found module - prefix: %s, 0x%016" G_GINT64_MODIFIER
+           "x-0x%016" G_GINT64_MODIFIER "x %s",
+           ctx->suffix, details->range->base_address,
+           details->range->base_address + details->range->size, details->path);
 
   *ctx->range = *details->range;
   ctx->done = true;
@@ -131,37 +135,53 @@ static gboolean convert_name_token_for_module(const GumModuleDetails *details,
 
 static void convert_name_token(gchar *token, GumMemoryRange *range) {
 
-  gchar *            suffix = g_strconcat("/", token, NULL);
+  gchar             *suffix = g_strconcat("/", token, NULL);
   convert_name_ctx_t ctx = {.suffix = suffix, .range = range, .done = false};
 
   gum_process_enumerate_modules(convert_name_token_for_module, &ctx);
-  if (!ctx.done) { FATAL("Failed to resolve module: %s\n", token); }
+  if (!ctx.done) { FFATAL("Failed to resolve module: %s\n", token); }
   g_free(suffix);
 
 }
 
 static void convert_token(gchar *token, GumMemoryRange *range) {
 
-  if (g_strrstr(token, "-")) {
+  if (g_str_has_prefix(token, "0x")) {
 
     convert_address_token(token, range);
 
-  } else {
+  }
+
+  else {
 
     convert_name_token(token, range);
 
   }
 
-  OKF("Converted token: %s -> 0x%016" G_GINT64_MODIFIER
-      "x-0x%016" G_GINT64_MODIFIER "x\n",
-      token, range->base_address, range->base_address + range->size);
+  FVERBOSE("Converted token: %s -> 0x%016" G_GINT64_MODIFIER
+           "x-0x%016" G_GINT64_MODIFIER "x\n",
+           token, range->base_address, range->base_address + range->size);
 
 }
 
 gint range_sort(gconstpointer a, gconstpointer b) {
 
-  return ((GumMemoryRange *)a)->base_address -
-         ((GumMemoryRange *)b)->base_address;
+  GumMemoryRange *ra = (GumMemoryRange *)a;
+  GumMemoryRange *rb = (GumMemoryRange *)b;
+
+  if (ra->base_address < rb->base_address) {
+
+    return -1;
+
+  } else if (ra->base_address > rb->base_address) {
+
+    return 1;
+
+  } else {
+
+    return 0;
+
+  }
 
 }
 
@@ -169,19 +189,27 @@ static gboolean print_ranges_callback(const GumRangeDetails *details,
                                       gpointer               user_data) {
 
   UNUSED_PARAMETER(user_data);
+
   if (details->file == NULL) {
 
-    OKF("MAP - 0x%016" G_GINT64_MODIFIER "x - 0x%016" G_GINT64_MODIFIER "X",
-        details->range->base_address,
-        details->range->base_address + details->range->size);
+    FVERBOSE("\t0x%016" G_GINT64_MODIFIER "x-0x%016" G_GINT64_MODIFIER
+             "X %c%c%c",
+             details->range->base_address,
+             details->range->base_address + details->range->size,
+             details->protection & GUM_PAGE_READ ? 'R' : '-',
+             details->protection & GUM_PAGE_WRITE ? 'W' : '-',
+             details->protection & GUM_PAGE_EXECUTE ? 'X' : '-');
 
   } else {
 
-    OKF("MAP - 0x%016" G_GINT64_MODIFIER "x - 0x%016" G_GINT64_MODIFIER
-        "X %s(0x%016" G_GINT64_MODIFIER "x)",
-        details->range->base_address,
-        details->range->base_address + details->range->size,
-        details->file->path, details->file->offset);
+    FVERBOSE("\t0x%016" G_GINT64_MODIFIER "x-0x%016" G_GINT64_MODIFIER
+             "X %c%c%c %s(0x%016" G_GINT64_MODIFIER "x)",
+             details->range->base_address,
+             details->range->base_address + details->range->size,
+             details->protection & GUM_PAGE_READ ? 'R' : '-',
+             details->protection & GUM_PAGE_WRITE ? 'W' : '-',
+             details->protection & GUM_PAGE_EXECUTE ? 'X' : '-',
+             details->file->path, details->file->offset);
 
   }
 
@@ -191,14 +219,14 @@ static gboolean print_ranges_callback(const GumRangeDetails *details,
 
 static void print_ranges(char *key, GArray *ranges) {
 
-  OKF("Range: %s Length: %d", key, ranges->len);
+  FVERBOSE("Range: [%s], Length: %d", key, ranges->len);
   for (guint i = 0; i < ranges->len; i++) {
 
     GumMemoryRange *curr = &g_array_index(ranges, GumMemoryRange, i);
     GumAddress      curr_limit = curr->base_address + curr->size;
-    OKF("Range: %s Idx: %3d - 0x%016" G_GINT64_MODIFIER
-        "x-0x%016" G_GINT64_MODIFIER "x",
-        key, i, curr->base_address, curr_limit);
+    FVERBOSE("\t%3d - 0x%016" G_GINT64_MODIFIER "x-0x%016" G_GINT64_MODIFIER
+             "x",
+             i, curr->base_address, curr_limit);
 
   }
 
@@ -207,7 +235,7 @@ static void print_ranges(char *key, GArray *ranges) {
 static gboolean collect_module_ranges_callback(const GumRangeDetails *details,
                                                gpointer user_data) {
 
-  GArray *       ranges = (GArray *)user_data;
+  GArray        *ranges = (GArray *)user_data;
   GumMemoryRange range = *details->range;
   g_array_append_val(ranges, range);
   return TRUE;
@@ -220,19 +248,56 @@ static GArray *collect_module_ranges(void) {
   result = g_array_new(false, false, sizeof(GumMemoryRange));
   gum_process_enumerate_ranges(GUM_PAGE_NO_ACCESS,
                                collect_module_ranges_callback, result);
-  print_ranges("Modules", result);
+  print_ranges("modules", result);
   return result;
+
+}
+
+static void check_for_overlaps(GArray *array) {
+
+  for (guint i = 1; i < array->len; i++) {
+
+    GumMemoryRange *prev = &g_array_index(array, GumMemoryRange, i - 1);
+    GumMemoryRange *curr = &g_array_index(array, GumMemoryRange, i);
+    GumAddress      prev_limit = prev->base_address + prev->size;
+    GumAddress      curr_limit = curr->base_address + curr->size;
+    if (prev_limit > curr->base_address) {
+
+      FFATAL("Overlapping ranges 0x%016" G_GINT64_MODIFIER
+             "x-0x%016" G_GINT64_MODIFIER "x 0x%016" G_GINT64_MODIFIER
+             "x-0x%016" G_GINT64_MODIFIER "x",
+             prev->base_address, prev_limit, curr->base_address, curr_limit);
+
+    }
+
+  }
+
+}
+
+void ranges_add_include(GumMemoryRange *range) {
+
+  g_array_append_val(include_ranges, *range);
+  g_array_sort(include_ranges, range_sort);
+  check_for_overlaps(include_ranges);
+
+}
+
+void ranges_add_exclude(GumMemoryRange *range) {
+
+  g_array_append_val(exclude_ranges, *range);
+  g_array_sort(exclude_ranges, range_sort);
+  check_for_overlaps(exclude_ranges);
 
 }
 
 static GArray *collect_ranges(char *env_key) {
 
-  char *         env_val;
-  gchar **       tokens;
+  char          *env_val;
+  gchar        **tokens;
   int            token_count;
   GumMemoryRange range;
   int            i;
-  GArray *       result;
+  GArray        *result;
 
   result = g_array_new(false, false, sizeof(GumMemoryRange));
 
@@ -253,23 +318,7 @@ static GArray *collect_ranges(char *env_key) {
 
   g_array_sort(result, range_sort);
 
-  /* Check for overlaps */
-  for (i = 1; i < token_count; i++) {
-
-    GumMemoryRange *prev = &g_array_index(result, GumMemoryRange, i - 1);
-    GumMemoryRange *curr = &g_array_index(result, GumMemoryRange, i);
-    GumAddress      prev_limit = prev->base_address + prev->size;
-    GumAddress      curr_limit = curr->base_address + curr->size;
-    if (prev_limit > curr->base_address) {
-
-      FATAL("OVerlapping ranges 0x%016" G_GINT64_MODIFIER
-            "x-0x%016" G_GINT64_MODIFIER "x 0x%016" G_GINT64_MODIFIER
-            "x-0x%016" G_GINT64_MODIFIER "x",
-            prev->base_address, prev_limit, curr->base_address, curr_limit);
-
-    }
-
-  }
+  check_for_overlaps(result);
 
   print_ranges(env_key, result);
 
@@ -281,26 +330,59 @@ static GArray *collect_ranges(char *env_key) {
 
 static GArray *collect_libs_ranges(void) {
 
-  GArray *       result;
+  GArray        *result;
   GumMemoryRange range;
   result = g_array_new(false, false, sizeof(GumMemoryRange));
 
-  if (getenv("AFL_INST_LIBS") == NULL) {
-
-    range.base_address = lib_get_text_base();
-    range.size = lib_get_text_limit() - lib_get_text_base();
-
-  } else {
+  if (ranges_inst_libs) {
 
     range.base_address = 0;
     range.size = G_MAXULONG;
+
+  } else {
+
+    range.base_address = lib_get_text_base();
+    range.size = lib_get_text_limit() - lib_get_text_base();
 
   }
 
   g_array_append_val(result, range);
 
-  print_ranges("AFL_INST_LIBS", result);
+  print_ranges("libs", result);
 
+  return result;
+
+}
+
+static gboolean collect_jit_ranges_callback(const GumRangeDetails *details,
+                                            gpointer               user_data) {
+
+  GArray *ranges = (GArray *)user_data;
+
+  /* If the executable code isn't backed by a file, it's probably JIT */
+  if (details->file == NULL) {
+
+    GumMemoryRange range = *details->range;
+    g_array_append_val(ranges, range);
+
+  }
+
+  return TRUE;
+
+}
+
+static GArray *collect_jit_ranges(void) {
+
+  GArray *result;
+  result = g_array_new(false, false, sizeof(GumMemoryRange));
+  if (!ranges_inst_jit) {
+
+    gum_process_enumerate_ranges(GUM_PAGE_EXECUTE, collect_jit_ranges_callback,
+                                 result);
+
+  }
+
+  print_ranges("jit", result);
   return result;
 
 }
@@ -340,7 +422,7 @@ static gboolean intersect_range(GumMemoryRange *rr, GumMemoryRange *ra,
 
 static GArray *intersect_ranges(GArray *a, GArray *b) {
 
-  GArray *        result;
+  GArray         *result;
   GumMemoryRange *ra;
   GumMemoryRange *rb;
   GumMemoryRange  ri;
@@ -370,7 +452,7 @@ static GArray *intersect_ranges(GArray *a, GArray *b) {
 
 static GArray *subtract_ranges(GArray *a, GArray *b) {
 
-  GArray *        result;
+  GArray         *result;
   GumMemoryRange *ra;
   GumAddress      ral;
   GumMemoryRange *rb;
@@ -446,7 +528,7 @@ static GArray *subtract_ranges(GArray *a, GArray *b) {
 
 static GArray *merge_ranges(GArray *a) {
 
-  GArray *        result;
+  GArray         *result;
   GumMemoryRange  rp;
   GumMemoryRange *r;
 
@@ -480,26 +562,46 @@ static GArray *merge_ranges(GArray *a) {
 
 }
 
+void ranges_print_debug_maps(void) {
+
+  FVERBOSE("Maps");
+  gum_process_enumerate_ranges(GUM_PAGE_NO_ACCESS, print_ranges_callback, NULL);
+
+}
+
+void ranges_config(void) {
+
+  if (getenv("AFL_FRIDA_DEBUG_MAPS") != NULL) { ranges_debug_maps = TRUE; }
+  if (getenv("AFL_INST_LIBS") != NULL) { ranges_inst_libs = TRUE; }
+  if (getenv("AFL_FRIDA_INST_JIT") != NULL) { ranges_inst_jit = TRUE; }
+
+  if (ranges_debug_maps) { ranges_print_debug_maps(); }
+
+  include_ranges = collect_ranges("AFL_FRIDA_INST_RANGES");
+  exclude_ranges = collect_ranges("AFL_FRIDA_EXCLUDE_RANGES");
+
+}
+
 void ranges_init(void) {
 
-  GumMemoryRange  ri;
-  GArray *        step1;
-  GArray *        step2;
-  GArray *        step3;
-  GArray *        step4;
-  GumMemoryRange *r;
-  GumStalker *    stalker;
+  GumMemoryRange ri;
+  GArray        *step1;
+  GArray        *step2;
+  GArray        *step3;
+  GArray        *step4;
+  GArray        *step5;
 
-  if (getenv("AFL_FRIDA_DEBUG_MAPS") != NULL) {
+  FOKF(cBLU "Ranges" cRST " - " cGRN "instrument jit:" cYEL " [%c]",
+       ranges_inst_jit ? 'X' : ' ');
+  FOKF(cBLU "Ranges" cRST " - " cGRN "instrument libraries:" cYEL " [%c]",
+       ranges_inst_libs ? 'X' : ' ');
 
-    gum_process_enumerate_ranges(GUM_PAGE_NO_ACCESS, print_ranges_callback,
-                                 NULL);
-
-  }
+  print_ranges("include", include_ranges);
+  print_ranges("exclude", exclude_ranges);
 
   module_ranges = collect_module_ranges();
   libs_ranges = collect_libs_ranges();
-  include_ranges = collect_ranges("AFL_FRIDA_INST_RANGES");
+  jit_ranges = collect_jit_ranges();
 
   /* If include ranges is empty, then assume everything is included */
   if (include_ranges->len == 0) {
@@ -509,8 +611,6 @@ void ranges_init(void) {
     g_array_append_val(include_ranges, ri);
 
   }
-
-  exclude_ranges = collect_ranges("AFL_FRIDA_EXCLUDE_RANGES");
 
   /* Intersect with .text section of main executable unless AFL_INST_LIBS */
   step1 = intersect_ranges(module_ranges, libs_ranges);
@@ -524,36 +624,30 @@ void ranges_init(void) {
   step3 = subtract_ranges(step2, exclude_ranges);
   print_ranges("step3", step3);
 
-  /*
-   * After step3, we have the total ranges to be instrumented, we now subtract
-   * that from the original ranges of the modules to configure stalker.
-   */
-
-  step4 = subtract_ranges(module_ranges, step3);
+  step4 = subtract_ranges(step3, jit_ranges);
   print_ranges("step4", step4);
 
-  ranges = merge_ranges(step4);
+  /*
+   * After step4, we have the total ranges to be instrumented, we now subtract
+   * that from the original ranges of the modules to configure stalker.
+   */
+  step5 = subtract_ranges(module_ranges, step4);
+  print_ranges("step5", step5);
+
+  ranges = merge_ranges(step5);
   print_ranges("final", ranges);
 
-  stalker = stalker_get();
-
-  for (guint i = 0; i < ranges->len; i++) {
-
-    r = &g_array_index(ranges, GumMemoryRange, i);
-    gum_stalker_exclude(stalker, r);
-
-  }
-
+  g_array_free(step5, TRUE);
   g_array_free(step4, TRUE);
   g_array_free(step3, TRUE);
   g_array_free(step2, TRUE);
   g_array_free(step1, TRUE);
 
+  ranges_exclude();
+
 }
 
-gboolean range_is_excluded(gpointer address) {
-
-  GumAddress test = GUM_ADDRESS(address);
+gboolean range_is_excluded(GumAddress address) {
 
   if (ranges == NULL) { return false; }
 
@@ -562,13 +656,29 @@ gboolean range_is_excluded(gpointer address) {
     GumMemoryRange *curr = &g_array_index(ranges, GumMemoryRange, i);
     GumAddress      curr_limit = curr->base_address + curr->size;
 
-    if (test < curr->base_address) { return false; }
+    if (address < curr->base_address) { return false; }
 
-    if (test < curr_limit) { return true; }
+    if (address < curr_limit) { return true; }
 
   }
 
   return false;
+
+}
+
+void ranges_exclude() {
+
+  GumMemoryRange *r;
+  GumStalker     *stalker = stalker_get();
+
+  FVERBOSE("Excluding ranges");
+
+  for (guint i = 0; i < ranges->len; i++) {
+
+    r = &g_array_index(ranges, GumMemoryRange, i);
+    gum_stalker_exclude(stalker, r);
+
+  }
 
 }
 

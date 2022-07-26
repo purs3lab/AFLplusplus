@@ -9,13 +9,13 @@
                         Andrea Fioraldi <andreafioraldi@gmail.com>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
    This is the real deal: the program takes an instrumented binary and
    attempts a variety of basic fuzzing tricks, paying close attention to
@@ -73,7 +73,7 @@ static int select_algorithm(afl_state_t *afl, u32 max_algorithm) {
 /* Helper to choose random block len for block operations in fuzz_one().
    Doesn't return zero, provided that max_len is > 0. */
 
-static u32 choose_block_len(afl_state_t *afl, u32 limit) {
+static inline u32 choose_block_len(afl_state_t *afl, u32 limit) {
 
   u32 min_value, max_value;
   u32 rlim = MIN(afl->queue_cycle, (u32)3);
@@ -373,7 +373,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
   u32 j;
   u32 i;
   u8 *in_buf, *out_buf, *orig_in, *ex_tmp, *eff_map = 0;
-  u64 havoc_queued = 0, orig_hit_cnt, new_hit_cnt = 0, prev_cksum;
+  u64 havoc_queued = 0, orig_hit_cnt, new_hit_cnt = 0, prev_cksum, _prev_cksum;
   u32 splice_cycle = 0, perf_score = 100, orig_perf, eff_cnt = 1;
 
   u8 ret_val = 1, doing_det = 0;
@@ -413,8 +413,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
        possibly skip to them at the expense of already-fuzzed or non-favored
        cases. */
 
-    if (((afl->queue_cur->was_fuzzed > 0 || afl->queue_cur->fuzz_level > 0) ||
-         !afl->queue_cur->favored) &&
+    if ((afl->queue_cur->fuzz_level || !afl->queue_cur->favored) &&
         likely(rand_below(afl, 100) < SKIP_TO_NEW_PROB)) {
 
       return 1;
@@ -423,14 +422,13 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   } else if (!afl->non_instrumented_mode && !afl->queue_cur->favored &&
 
-             afl->queued_paths > 10) {
+             afl->queued_items > 10) {
 
     /* Otherwise, still possibly skip non-favored cases, albeit less often.
        The odds of skipping stuff are higher for already-fuzzed inputs and
        lower for never-fuzzed entries. */
 
-    if (afl->queue_cycle > 1 &&
-        (afl->queue_cur->fuzz_level == 0 || afl->queue_cur->was_fuzzed)) {
+    if (afl->queue_cycle > 1 && !afl->queue_cur->fuzz_level) {
 
       if (likely(rand_below(afl, 100) < SKIP_NFAV_NEW_PROB)) { return 1; }
 
@@ -447,12 +445,12 @@ u8 fuzz_one_original(afl_state_t *afl) {
   if (unlikely(afl->not_on_tty)) {
 
     ACTF(
-        "Fuzzing test case #%u (%u total, %llu uniq crashes found, "
-        "perf_score=%0.0f, exec_us=%llu, hits=%u, map=%u)...",
-        afl->current_entry, afl->queued_paths, afl->unique_crashes,
+        "Fuzzing test case #%u (%u total, %llu crashes saved, "
+        "perf_score=%0.0f, exec_us=%llu, hits=%u, map=%u, ascii=%u)...",
+        afl->current_entry, afl->queued_items, afl->saved_crashes,
         afl->queue_cur->perf_score, afl->queue_cur->exec_us,
         likely(afl->n_fuzz) ? afl->n_fuzz[afl->queue_cur->n_fuzz_entry] : 0,
-        afl->queue_cur->bitmap_size);
+        afl->queue_cur->bitmap_size, afl->queue_cur->is_ascii);
     fflush(stdout);
 
   }
@@ -492,7 +490,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     if (unlikely(afl->stop_soon) || res != afl->crash_mode) {
 
-      ++afl->cur_skipped_paths;
+      ++afl->cur_skipped_items;
       goto abandon_entry;
 
     }
@@ -519,7 +517,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     if (unlikely(afl->stop_soon)) {
 
-      ++afl->cur_skipped_paths;
+      ++afl->cur_skipped_items;
       goto abandon_entry;
 
     }
@@ -547,7 +545,11 @@ u8 fuzz_one_original(afl_state_t *afl) {
     afl->queue_cur->perf_score = orig_perf = perf_score =
         calculate_score(afl, afl->queue_cur);
 
-  if (unlikely(perf_score <= 0)) { goto abandon_entry; }
+  if (unlikely(perf_score <= 0 && afl->active_items > 1)) {
+
+    goto abandon_entry;
+
+  }
 
   if (unlikely(afl->shm.cmplog_mode &&
                afl->queue_cur->colorized < afl->cmplog_lvl &&
@@ -561,8 +563,9 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
       if (afl->cmplog_lvl == 3 ||
           (afl->cmplog_lvl == 2 && afl->queue_cur->tc_ref) ||
-          !(afl->fsrv.total_execs % afl->queued_paths) ||
-          get_cur_time() - afl->last_path_time > 300000) {
+          afl->queue_cur->favored ||
+          !(afl->fsrv.total_execs % afl->queued_items) ||
+          get_cur_time() - afl->last_find_time > 300000) {  // 300 seconds
 
         if (input_to_state_stage(afl, in_buf, out_buf, len)) {
 
@@ -625,9 +628,16 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   afl->stage_val_type = STAGE_VAL_NONE;
 
-  orig_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  orig_hit_cnt = afl->queued_items + afl->saved_crashes;
 
-  prev_cksum = afl->queue_cur->exec_cksum;
+  /* Get a clean cksum. */
+
+  if (common_fuzz_stuff(afl, out_buf, len)) { goto abandon_entry; }
+
+  prev_cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
+  _prev_cksum = prev_cksum;
+
+  /* Now flip bits. */
 
   for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
 
@@ -713,7 +723,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
       /* Continue collecting string, but only if the bit flip actually made
          any difference - we don't want no-op tokens. */
 
-      if (cksum != afl->queue_cur->exec_cksum) {
+      if (cksum != _prev_cksum) {
 
         if (a_len < MAX_AUTO_EXTRA) {
 
@@ -729,7 +739,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP1] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP1] += afl->stage_max;
@@ -761,7 +771,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP2] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP2] += afl->stage_max;
@@ -797,7 +807,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP4] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP4] += afl->stage_max;
@@ -836,6 +846,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
   afl->stage_max = len;
 
   orig_hit_cnt = new_hit_cnt;
+  prev_cksum = _prev_cksum;
 
   for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
 
@@ -868,11 +879,11 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
       } else {
 
-        cksum = ~afl->queue_cur->exec_cksum;
+        cksum = ~prev_cksum;
 
       }
 
-      if (cksum != afl->queue_cur->exec_cksum) {
+      if (cksum != prev_cksum) {
 
         eff_map[EFF_APOS(afl->stage_cur)] = 1;
         ++eff_cnt;
@@ -904,7 +915,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   afl->blocks_eff_total += EFF_ALEN(len);
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP8] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP8] += afl->stage_max;
@@ -947,7 +958,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP16] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP16] += afl->stage_max;
@@ -990,7 +1001,7 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP32] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP32] += afl->stage_max;
@@ -1082,7 +1093,7 @@ skip_bitflip:
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_ARITH8] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_ARITH8] += afl->stage_max;
@@ -1212,7 +1223,7 @@ skip_bitflip:
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_ARITH16] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_ARITH16] += afl->stage_max;
@@ -1341,7 +1352,7 @@ skip_bitflip:
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_ARITH32] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_ARITH32] += afl->stage_max;
@@ -1407,7 +1418,7 @@ skip_arith:
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_INTEREST8] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_INTEREST8] += afl->stage_max;
@@ -1495,7 +1506,7 @@ skip_arith:
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_INTEREST16] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_INTEREST16] += afl->stage_max;
@@ -1584,7 +1595,7 @@ skip_arith:
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_INTEREST32] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_INTEREST32] += afl->stage_max;
@@ -1657,7 +1668,7 @@ skip_interest:
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_EXTRAS_UO] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_EXTRAS_UO] += afl->stage_max;
@@ -1713,7 +1724,7 @@ skip_interest:
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_EXTRAS_UI] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_EXTRAS_UI] += afl->stage_max;
@@ -1771,10 +1782,66 @@ skip_user_extras:
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_EXTRAS_AO] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_EXTRAS_AO] += afl->stage_max;
+
+  /* Insertion of auto extras. */
+
+  afl->stage_name = "auto extras (insert)";
+  afl->stage_short = "ext_AI";
+  afl->stage_cur = 0;
+  afl->stage_max = afl->a_extras_cnt * (len + 1);
+
+  orig_hit_cnt = new_hit_cnt;
+
+  ex_tmp = afl_realloc(AFL_BUF_PARAM(ex), len + MAX_DICT_FILE);
+  if (unlikely(!ex_tmp)) { PFATAL("alloc"); }
+
+  for (i = 0; i <= (u32)len; ++i) {
+
+    afl->stage_cur_byte = i;
+
+    for (j = 0; j < afl->a_extras_cnt; ++j) {
+
+      if (len + afl->a_extras[j].len > MAX_FILE) {
+
+        --afl->stage_max;
+        continue;
+
+      }
+
+      /* Insert token */
+      memcpy(ex_tmp + i, afl->a_extras[j].data, afl->a_extras[j].len);
+
+      /* Copy tail */
+      memcpy(ex_tmp + i + afl->a_extras[j].len, out_buf + i, len - i);
+
+#ifdef INTROSPECTION
+      snprintf(afl->mutation, sizeof(afl->mutation),
+               "%s AUTO_EXTRAS_insert-%u-%u", afl->queue_cur->fname, i, j);
+#endif
+
+      if (common_fuzz_stuff(afl, ex_tmp, len + afl->a_extras[j].len)) {
+
+        goto abandon_entry;
+
+      }
+
+      ++afl->stage_cur;
+
+    }
+
+    /* Copy head */
+    ex_tmp[i] = out_buf[i];
+
+  }
+
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
+
+  afl->stage_finds[STAGE_EXTRAS_AI] += new_hit_cnt - orig_hit_cnt;
+  afl->stage_cycles[STAGE_EXTRAS_AI] += afl->stage_max;
 
 skip_extras:
 
@@ -1801,7 +1868,7 @@ custom_mutator_stage:
 
   const u32 max_seed_size = MAX_FILE, saved_max = afl->stage_max;
 
-  orig_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  orig_hit_cnt = afl->queued_items + afl->saved_crashes;
 
 #ifdef INTROSPECTION
   afl->mutation[0] = 0;
@@ -1834,7 +1901,7 @@ custom_mutator_stage:
 
           struct queue_entry *target = NULL;
           u32                 tid;
-          u8 *                new_buf = NULL;
+          u8                 *new_buf = NULL;
           u32                 target_len = 0;
 
           /* check if splicing makes sense yet (enough entries) */
@@ -1845,7 +1912,7 @@ custom_mutator_stage:
 
             do {
 
-              tid = rand_below(afl, afl->queued_paths);
+              tid = rand_below(afl, afl->queued_items);
 
             } while (unlikely(tid == afl->current_entry ||
 
@@ -1885,7 +1952,7 @@ custom_mutator_stage:
               /* If we're finding new stuff, let's run for a bit longer, limits
                 permitting. */
 
-              if (afl->queued_paths != havoc_queued) {
+              if (afl->queued_items != havoc_queued) {
 
                 if (perf_score <= afl->havoc_max_mult * 100) {
 
@@ -1894,7 +1961,7 @@ custom_mutator_stage:
 
                 }
 
-                havoc_queued = afl->queued_paths;
+                havoc_queued = afl->queued_items;
 
               }
 
@@ -1902,11 +1969,7 @@ custom_mutator_stage:
 
           }
 
-          /* `(afl->)out_buf` may have been changed by the call to custom_fuzz
-           */
-          /* TODO: Only do this when `mutated_buf` == `out_buf`? Branch vs
-           * Memcpy.
-           */
+          /* out_buf may have been changed by the call to custom_fuzz */
           memcpy(out_buf, in_buf, len);
 
         }
@@ -1921,7 +1984,7 @@ custom_mutator_stage:
 
   if (!has_custom_fuzz) goto havoc_stage;
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_CUSTOM_MUTATOR] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_CUSTOM_MUTATOR] += afl->stage_max;
@@ -1967,9 +2030,9 @@ havoc_stage:
 
   temp_len = len;
 
-  orig_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  orig_hit_cnt = afl->queued_items + afl->saved_crashes;
 
-  havoc_queued = afl->queued_paths;
+  havoc_queued = afl->queued_items;
 
   if (afl->custom_mutators_count) {
 
@@ -1997,12 +2060,17 @@ havoc_stage:
   /* We essentially just do several thousand runs (depending on perf_score)
      where we take the input file and make random stacked tweaks. */
 
-#define MAX_HAVOC_ENTRY 59                                      /* 55 to 60 */
+#define MAX_HAVOC_ENTRY 64
+#define MUTATE_ASCII_DICT 64
 
   u32 r_max, r;
 
   r_max = (MAX_HAVOC_ENTRY + 1) + (afl->extras_cnt ? 4 : 0) +
-          (afl->a_extras_cnt ? 4 : 0);
+          (afl->a_extras_cnt
+               ? (unlikely(afl->cmplog_binary && afl->queue_cur->is_ascii)
+                      ? MUTATE_ASCII_DICT
+                      : 4)
+               : 0);
 
   if (unlikely(afl->expand_havoc && afl->ready_for_splicing_count > 1)) {
 
@@ -2013,7 +2081,7 @@ havoc_stage:
 
   }
 
-  if (unlikely(get_cur_time() - afl->last_path_time > 5000 &&
+  if (unlikely(get_cur_time() - afl->last_find_time > 5000 /* 5 seconds */ &&
                afl->ready_for_splicing_count > 1)) {
 
     /* add expensive havoc cases here if there is no findings in the last 5s */
@@ -2042,7 +2110,7 @@ havoc_stage:
           if (el->stacked_custom &&
               rand_below(afl, 100) < el->stacked_custom_prob) {
 
-            u8 *   custom_havoc_buf = NULL;
+            u8    *custom_havoc_buf = NULL;
             size_t new_len = el->afl_custom_havoc_mutation(
                 el->data, out_buf, temp_len, &custom_havoc_buf, MAX_FILE);
             if (unlikely(!custom_havoc_buf)) {
@@ -2056,7 +2124,7 @@ havoc_stage:
               temp_len = new_len;
               if (out_buf != custom_havoc_buf) {
 
-                afl_realloc(AFL_BUF_PARAM(out), temp_len);
+                out_buf = afl_realloc(AFL_BUF_PARAM(out), temp_len);
                 if (unlikely(!afl->out_buf)) { PFATAL("alloc"); }
                 memcpy(out_buf, custom_havoc_buf, temp_len);
 
@@ -2101,7 +2169,7 @@ havoc_stage:
 
         case 8 ... 9: {
 
-          /* Set word to interesting value, randomly choosing endian. */
+          /* Set word to interesting value, little endian. */
 
           if (temp_len < 2) { break; }
 
@@ -2118,7 +2186,7 @@ havoc_stage:
 
         case 10 ... 11: {
 
-          /* Set word to interesting value, randomly choosing endian. */
+          /* Set word to interesting value, big endian. */
 
           if (temp_len < 2) { break; }
 
@@ -2135,7 +2203,7 @@ havoc_stage:
 
         case 12 ... 13: {
 
-          /* Set dword to interesting value, randomly choosing endian. */
+          /* Set dword to interesting value, little endian. */
 
           if (temp_len < 4) { break; }
 
@@ -2152,7 +2220,7 @@ havoc_stage:
 
         case 14 ... 15: {
 
-          /* Set dword to interesting value, randomly choosing endian. */
+          /* Set dword to interesting value, big endian. */
 
           if (temp_len < 4) { break; }
 
@@ -2496,12 +2564,101 @@ havoc_stage:
 
         }
 
-        // increase from 4 up to 8?
-        case 52 ... MAX_HAVOC_ENTRY: {
+        case 52: {
 
-          /* Delete bytes. We're making this a bit more likely
-             than insertion (the next option) in hopes of keeping
-             files reasonably small. */
+          /* Increase byte by 1. */
+
+#ifdef INTROSPECTION
+          snprintf(afl->m_tmp, sizeof(afl->m_tmp), " ADDBYTE_");
+          strcat(afl->mutation, afl->m_tmp);
+#endif
+          out_buf[rand_below(afl, temp_len)]++;
+          break;
+
+        }
+
+        case 53: {
+
+          /* Decrease byte by 1. */
+
+#ifdef INTROSPECTION
+          snprintf(afl->m_tmp, sizeof(afl->m_tmp), " SUBBYTE_");
+          strcat(afl->mutation, afl->m_tmp);
+#endif
+          out_buf[rand_below(afl, temp_len)]--;
+          break;
+
+        }
+
+        case 54: {
+
+          /* Flip byte. */
+
+#ifdef INTROSPECTION
+          snprintf(afl->m_tmp, sizeof(afl->m_tmp), " FLIP8_");
+          strcat(afl->mutation, afl->m_tmp);
+#endif
+          out_buf[rand_below(afl, temp_len)] ^= 0xff;
+          break;
+
+        }
+
+        case 55 ... 56: {
+
+          if (temp_len < 4) { break; }
+
+          /* Switch bytes. */
+
+          u32 to_end, switch_to, switch_len, switch_from;
+          switch_from = rand_below(afl, temp_len);
+          do {
+
+            switch_to = rand_below(afl, temp_len);
+
+          } while (switch_from == switch_to);
+
+          if (switch_from < switch_to) {
+
+            switch_len = switch_to - switch_from;
+            to_end = temp_len - switch_to;
+
+          } else {
+
+            switch_len = switch_from - switch_to;
+            to_end = temp_len - switch_from;
+
+          }
+
+          switch_len = choose_block_len(afl, MIN(switch_len, to_end));
+
+#ifdef INTROSPECTION
+          snprintf(afl->m_tmp, sizeof(afl->m_tmp), " SWITCH-%s-%u-%u-%u",
+                   "switch", switch_from, switch_to, switch_len);
+          strcat(afl->mutation, afl->m_tmp);
+#endif
+          u8 *new_buf = afl_realloc(AFL_BUF_PARAM(out_scratch), switch_len);
+          if (unlikely(!new_buf)) { PFATAL("alloc"); }
+
+          /* Backup */
+
+          memcpy(new_buf, out_buf + switch_from, switch_len);
+
+          /* Switch 1 */
+
+          memcpy(out_buf + switch_from, out_buf + switch_to, switch_len);
+
+          /* Switch 2 */
+
+          memcpy(out_buf + switch_to, new_buf, switch_len);
+
+          break;
+
+        }
+
+        // MAX_HAVOC_ENTRY = 64
+        case 57 ... MAX_HAVOC_ENTRY: {
+
+          /* Delete bytes. */
 
           if (temp_len < 2) { break; }
 
@@ -2587,7 +2744,15 @@ havoc_stage:
 
           if (afl->a_extras_cnt) {
 
-            if (r < 2) {
+            u32 r_cmp = 2;
+
+            if (unlikely(afl->cmplog_binary && afl->queue_cur->is_ascii)) {
+
+              r_cmp = MUTATE_ASCII_DICT >> 1;
+
+            }
+
+            if (r < r_cmp) {
 
               /* Use the dictionary. */
 
@@ -2607,7 +2772,7 @@ havoc_stage:
 
               break;
 
-            } else if (r < 4) {
+            } else if (r < (r_cmp << 1)) {
 
               u32 use_extra = rand_below(afl, afl->a_extras_cnt);
               u32 extra_len = afl->a_extras[use_extra].len;
@@ -2636,7 +2801,7 @@ havoc_stage:
 
             } else {
 
-              r -= 4;
+              r -= (r_cmp << 1);
 
             }
 
@@ -2651,14 +2816,14 @@ havoc_stage:
           u32 tid;
           do {
 
-            tid = rand_below(afl, afl->queued_paths);
+            tid = rand_below(afl, afl->queued_items);
 
           } while (tid == afl->current_entry || afl->queue_buf[tid]->len < 4);
 
           /* Get the testcase for splicing. */
           struct queue_entry *target = afl->queue_buf[tid];
           u32                 new_len = target->len;
-          u8 *                new_buf = queue_testcase_get(afl, target);
+          u8                 *new_buf = queue_testcase_get(afl, target);
 
           if ((temp_len >= 2 && r % 2) || temp_len + HAVOC_BLK_XL >= MAX_FILE) {
 
@@ -2739,7 +2904,7 @@ havoc_stage:
     /* If we're finding new stuff, let's run for a bit longer, limits
        permitting. */
 
-    if (afl->queued_paths != havoc_queued) {
+    if (afl->queued_items != havoc_queued) {
 
       if (perf_score <= afl->havoc_max_mult * 100) {
 
@@ -2748,13 +2913,13 @@ havoc_stage:
 
       }
 
-      havoc_queued = afl->queued_paths;
+      havoc_queued = afl->queued_items;
 
     }
 
   }
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   if (!splice_cycle) {
 
@@ -2786,7 +2951,7 @@ retry_splicing:
 
     struct queue_entry *target;
     u32                 tid, split_at;
-    u8 *                new_buf;
+    u8                 *new_buf;
     s32                 f_diff, l_diff;
 
     /* First of all, if we've modified in_buf for havoc, let's clean that
@@ -2803,7 +2968,7 @@ retry_splicing:
 
     do {
 
-      tid = rand_below(afl, afl->queued_paths);
+      tid = rand_below(afl, afl->queued_items);
 
     } while (tid == afl->current_entry || afl->queue_buf[tid]->len < 4);
 
@@ -2854,16 +3019,12 @@ abandon_entry:
      cycle and have not seen this entry before. */
 
   if (!afl->stop_soon && !afl->queue_cur->cal_failed &&
-      (afl->queue_cur->was_fuzzed == 0 || afl->queue_cur->fuzz_level == 0) &&
-      !afl->queue_cur->disabled) {
+      !afl->queue_cur->was_fuzzed && !afl->queue_cur->disabled) {
 
-    if (!afl->queue_cur->was_fuzzed) {
-
-      --afl->pending_not_fuzzed;
-      afl->queue_cur->was_fuzzed = 1;
-      if (afl->queue_cur->favored) { --afl->pending_favored; }
-
-    }
+    --afl->pending_not_fuzzed;
+    afl->queue_cur->was_fuzzed = 1;
+    afl->reinit_table = 1;
+    if (afl->queue_cur->favored) { --afl->pending_favored; }
 
   }
 
@@ -2893,7 +3054,8 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
   u32 i;
   u32 j;
   u8 *in_buf, *out_buf, *orig_in, *ex_tmp, *eff_map = 0;
-  u64 havoc_queued = 0, orig_hit_cnt, new_hit_cnt = 0, cur_ms_lv, prev_cksum;
+  u64 havoc_queued = 0, orig_hit_cnt, new_hit_cnt = 0, cur_ms_lv, prev_cksum,
+      _prev_cksum;
   u32 splice_cycle = 0, perf_score = 100, orig_perf, eff_cnt = 1;
 
   u8 ret_val = 1, doing_det = 0;
@@ -2916,8 +3078,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
        possibly skip to them at the expense of already-fuzzed or non-favored
        cases. */
 
-    if (((afl->queue_cur->was_fuzzed > 0 || afl->queue_cur->fuzz_level > 0) ||
-         !afl->queue_cur->favored) &&
+    if ((afl->queue_cur->fuzz_level || !afl->queue_cur->favored) &&
         rand_below(afl, 100) < SKIP_TO_NEW_PROB) {
 
       return 1;
@@ -2926,14 +3087,13 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
   } else if (!afl->non_instrumented_mode && !afl->queue_cur->favored &&
 
-             afl->queued_paths > 10) {
+             afl->queued_items > 10) {
 
     /* Otherwise, still possibly skip non-favored cases, albeit less often.
        The odds of skipping stuff are higher for already-fuzzed inputs and
        lower for never-fuzzed entries. */
 
-    if (afl->queue_cycle > 1 &&
-        (afl->queue_cur->fuzz_level == 0 || afl->queue_cur->was_fuzzed)) {
+    if (afl->queue_cycle > 1 && !afl->queue_cur->fuzz_level) {
 
       if (likely(rand_below(afl, 100) < SKIP_NFAV_NEW_PROB)) { return 1; }
 
@@ -2949,8 +3109,8 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
   if (afl->not_on_tty) {
 
-    ACTF("Fuzzing test case #%u (%u total, %llu uniq crashes found)...",
-         afl->current_entry, afl->queued_paths, afl->unique_crashes);
+    ACTF("Fuzzing test case #%u (%u total, %llu crashes saved)...",
+         afl->current_entry, afl->queued_items, afl->saved_crashes);
     fflush(stdout);
 
   }
@@ -2991,7 +3151,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
     if (afl->stop_soon || res != afl->crash_mode) {
 
-      ++afl->cur_skipped_paths;
+      ++afl->cur_skipped_items;
       goto abandon_entry;
 
     }
@@ -3018,7 +3178,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
     if (unlikely(afl->stop_soon)) {
 
-      ++afl->cur_skipped_paths;
+      ++afl->cur_skipped_items;
       goto abandon_entry;
 
     }
@@ -3045,7 +3205,11 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
   else
     orig_perf = perf_score = calculate_score(afl, afl->queue_cur);
 
-  if (unlikely(perf_score <= 0)) { goto abandon_entry; }
+  if (unlikely(perf_score <= 0 && afl->active_items > 1)) {
+
+    goto abandon_entry;
+
+  }
 
   if (unlikely(afl->shm.cmplog_mode &&
                afl->queue_cur->colorized < afl->cmplog_lvl &&
@@ -3059,8 +3223,8 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
       if (afl->cmplog_lvl == 3 ||
           (afl->cmplog_lvl == 2 && afl->queue_cur->tc_ref) ||
-          !(afl->fsrv.total_execs % afl->queued_paths) ||
-          get_cur_time() - afl->last_path_time > 300000) {
+          !(afl->fsrv.total_execs % afl->queued_items) ||
+          get_cur_time() - afl->last_find_time > 300000) {  // 300 seconds
 
         if (input_to_state_stage(afl, in_buf, out_buf, len)) {
 
@@ -3078,10 +3242,10 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
   cur_ms_lv = get_cur_time();
   if (!(afl->key_puppet == 0 &&
-        ((cur_ms_lv - afl->last_path_time < (u32)afl->limit_time_puppet) ||
+        ((cur_ms_lv - afl->last_find_time < (u32)afl->limit_time_puppet) ||
          (afl->last_crash_time != 0 &&
           cur_ms_lv - afl->last_crash_time < (u32)afl->limit_time_puppet) ||
-         afl->last_path_time == 0))) {
+         afl->last_find_time == 0))) {
 
     afl->key_puppet = 1;
     goto pacemaker_fuzzing;
@@ -3133,9 +3297,16 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
   afl->stage_val_type = STAGE_VAL_NONE;
 
-  orig_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  orig_hit_cnt = afl->queued_items + afl->saved_crashes;
 
-  prev_cksum = afl->queue_cur->exec_cksum;
+  /* Get a clean cksum. */
+
+  if (common_fuzz_stuff(afl, out_buf, len)) { goto abandon_entry; }
+
+  prev_cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
+  _prev_cksum = prev_cksum;
+
+  /* Now flip bits. */
 
   for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
 
@@ -3220,7 +3391,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
       /* Continue collecting string, but only if the bit flip actually made
          any difference - we don't want no-op tokens. */
 
-      if (cksum != afl->queue_cur->exec_cksum) {
+      if (cksum != _prev_cksum) {
 
         if (a_len < MAX_AUTO_EXTRA) {
 
@@ -3236,7 +3407,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
   }                                                   /* for afl->stage_cur */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP1] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP1] += afl->stage_max;
@@ -3267,7 +3438,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
   }                                                   /* for afl->stage_cur */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP2] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP2] += afl->stage_max;
@@ -3302,7 +3473,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
   }                                                   /* for afl->stage_cur */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP4] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP4] += afl->stage_max;
@@ -3341,6 +3512,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
   afl->stage_max = len;
 
   orig_hit_cnt = new_hit_cnt;
+  prev_cksum = _prev_cksum;
 
   for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
 
@@ -3372,11 +3544,11 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
       } else {
 
-        cksum = ~afl->queue_cur->exec_cksum;
+        cksum = ~prev_cksum;
 
       }
 
-      if (cksum != afl->queue_cur->exec_cksum) {
+      if (cksum != prev_cksum) {
 
         eff_map[EFF_APOS(afl->stage_cur)] = 1;
         ++eff_cnt;
@@ -3408,7 +3580,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
   afl->blocks_eff_total += EFF_ALEN(len);
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP8] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP8] += afl->stage_max;
@@ -3450,7 +3622,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
   }                                                   /* for i = 0; i < len */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP16] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP16] += afl->stage_max;
@@ -3492,7 +3664,7 @@ static u8 mopt_common_fuzzing(afl_state_t *afl, MOpt_globals_t MOpt_globals) {
 
   }                                               /* for i = 0; i < len - 3 */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_FLIP32] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_FLIP32] += afl->stage_max;
@@ -3582,7 +3754,7 @@ skip_bitflip:
 
   }                                                   /* for i = 0; i < len */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_ARITH8] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_ARITH8] += afl->stage_max;
@@ -3708,7 +3880,7 @@ skip_bitflip:
 
   }                                               /* for i = 0; i < len - 1 */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_ARITH16] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_ARITH16] += afl->stage_max;
@@ -3833,7 +4005,7 @@ skip_bitflip:
 
   }                                               /* for i = 0; i < len - 3 */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_ARITH32] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_ARITH32] += afl->stage_max;
@@ -3898,7 +4070,7 @@ skip_arith:
 
   }                                                   /* for i = 0; i < len */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_INTEREST8] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_INTEREST8] += afl->stage_max;
@@ -3984,7 +4156,7 @@ skip_arith:
 
   }                                               /* for i = 0; i < len - 1 */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_INTEREST16] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_INTEREST16] += afl->stage_max;
@@ -4071,7 +4243,7 @@ skip_arith:
 
   }                                               /* for i = 0; i < len - 3 */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_INTEREST32] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_INTEREST32] += afl->stage_max;
@@ -4144,7 +4316,7 @@ skip_interest:
 
   }                                                   /* for i = 0; i < len */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_EXTRAS_UO] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_EXTRAS_UO] += afl->stage_max;
@@ -4200,7 +4372,7 @@ skip_interest:
 
   }                                                  /* for i = 0; i <= len */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_EXTRAS_UI] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_EXTRAS_UI] += afl->stage_max;
@@ -4259,10 +4431,66 @@ skip_user_extras:
 
   }                                                   /* for i = 0; i < len */
 
-  new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
   afl->stage_finds[STAGE_EXTRAS_AO] += new_hit_cnt - orig_hit_cnt;
   afl->stage_cycles[STAGE_EXTRAS_AO] += afl->stage_max;
+
+  /* Insertion of auto extras. */
+
+  afl->stage_name = "auto extras (insert)";
+  afl->stage_short = "ext_AI";
+  afl->stage_cur = 0;
+  afl->stage_max = afl->a_extras_cnt * (len + 1);
+
+  orig_hit_cnt = new_hit_cnt;
+
+  ex_tmp = afl_realloc(AFL_BUF_PARAM(ex), len + MAX_DICT_FILE);
+  if (unlikely(!ex_tmp)) { PFATAL("alloc"); }
+
+  for (i = 0; i <= (u32)len; ++i) {
+
+    afl->stage_cur_byte = i;
+
+    for (j = 0; j < afl->a_extras_cnt; ++j) {
+
+      if (len + afl->a_extras[j].len > MAX_FILE) {
+
+        --afl->stage_max;
+        continue;
+
+      }
+
+      /* Insert token */
+      memcpy(ex_tmp + i, afl->a_extras[j].data, afl->a_extras[j].len);
+
+      /* Copy tail */
+      memcpy(ex_tmp + i + afl->a_extras[j].len, out_buf + i, len - i);
+
+#ifdef INTROSPECTION
+      snprintf(afl->mutation, sizeof(afl->mutation),
+               "%s MOPT_AUTO_EXTRAS_insert-%u-%u", afl->queue_cur->fname, i, j);
+#endif
+
+      if (common_fuzz_stuff(afl, ex_tmp, len + afl->a_extras[j].len)) {
+
+        goto abandon_entry;
+
+      }
+
+      ++afl->stage_cur;
+
+    }
+
+    /* Copy head */
+    ex_tmp[i] = out_buf[i];
+
+  }                                                  /* for i = 0; i <= len */
+
+  new_hit_cnt = afl->queued_items + afl->saved_crashes;
+
+  afl->stage_finds[STAGE_EXTRAS_AI] += new_hit_cnt - orig_hit_cnt;
+  afl->stage_cycles[STAGE_EXTRAS_AI] += afl->stage_max;
 
 skip_extras:
 
@@ -4312,7 +4540,7 @@ pacemaker_fuzzing:
 
       if (unlikely(afl->orig_hit_cnt_puppet == 0)) {
 
-        afl->orig_hit_cnt_puppet = afl->queued_paths + afl->unique_crashes;
+        afl->orig_hit_cnt_puppet = afl->queued_items + afl->saved_crashes;
         afl->last_limit_time_start = get_cur_time();
         afl->SPLICE_CYCLES_puppet =
             (rand_below(
@@ -4357,18 +4585,18 @@ pacemaker_fuzzing:
 
       temp_len = len;
 
-      orig_hit_cnt = afl->queued_paths + afl->unique_crashes;
+      orig_hit_cnt = afl->queued_items + afl->saved_crashes;
 
-      havoc_queued = afl->queued_paths;
+      havoc_queued = afl->queued_items;
 
-      u32 r_max;
+      u32 r_max, r;
 
-      r_max = 15 + ((afl->extras_cnt + afl->a_extras_cnt) ? 2 : 0);
+      r_max = 16 + ((afl->extras_cnt + afl->a_extras_cnt) ? 2 : 0);
 
       if (unlikely(afl->expand_havoc && afl->ready_for_splicing_count > 1)) {
 
         /* add expensive havoc cases here, they are activated after a full
-           cycle without finds happened */
+           cycle without any finds happened */
 
         ++r_max;
 
@@ -4394,7 +4622,7 @@ pacemaker_fuzzing:
 
         for (i = 0; i < use_stacking; ++i) {
 
-          switch (select_algorithm(afl, r_max)) {
+          switch (r = (select_algorithm(afl, r_max))) {
 
             case 0:
               /* Flip a single bit somewhere. Spooky! */
@@ -4811,192 +5039,196 @@ pacemaker_fuzzing:
 
             }                                                    /* case 15 */
 
+            default: {
+
               /* Values 16 and 17 can be selected only if there are any extras
                  present in the dictionaries. */
 
-            case 16: {
+              r -= 16;
 
-              /* Overwrite bytes with an extra. */
+              if (r == 0 && (afl->extras_cnt || afl->a_extras_cnt)) {
 
-              if (!afl->extras_cnt ||
-                  (afl->a_extras_cnt && rand_below(afl, 2))) {
+                /* Overwrite bytes with an extra. */
 
-                /* No user-specified extras or odds in our favor. Let's use an
-                  auto-detected one. */
+                if (!afl->extras_cnt ||
+                    (afl->a_extras_cnt && rand_below(afl, 2))) {
 
-                u32 use_extra = rand_below(afl, afl->a_extras_cnt);
-                u32 extra_len = afl->a_extras[use_extra].len;
+                  /* No user-specified extras or odds in our favor. Let's use an
+                    auto-detected one. */
 
-                if (extra_len > (u32)temp_len) break;
+                  u32 use_extra = rand_below(afl, afl->a_extras_cnt);
+                  u32 extra_len = afl->a_extras[use_extra].len;
 
-                u32 insert_at = rand_below(afl, temp_len - extra_len + 1);
+                  if (extra_len > (u32)temp_len) break;
+
+                  u32 insert_at = rand_below(afl, temp_len - extra_len + 1);
 #ifdef INTROSPECTION
-                snprintf(afl->m_tmp, sizeof(afl->m_tmp),
-                         " AUTO_EXTRA_OVERWRITE-%u-%u", insert_at, extra_len);
-                strcat(afl->mutation, afl->m_tmp);
+                  snprintf(afl->m_tmp, sizeof(afl->m_tmp),
+                           " AUTO_EXTRA_OVERWRITE-%u-%u", insert_at, extra_len);
+                  strcat(afl->mutation, afl->m_tmp);
 #endif
-                memcpy(out_buf + insert_at, afl->a_extras[use_extra].data,
-                       extra_len);
+                  memcpy(out_buf + insert_at, afl->a_extras[use_extra].data,
+                         extra_len);
 
-              } else {
+                } else {
 
-                /* No auto extras or odds in our favor. Use the dictionary. */
+                  /* No auto extras or odds in our favor. Use the dictionary. */
 
-                u32 use_extra = rand_below(afl, afl->extras_cnt);
-                u32 extra_len = afl->extras[use_extra].len;
+                  u32 use_extra = rand_below(afl, afl->extras_cnt);
+                  u32 extra_len = afl->extras[use_extra].len;
 
-                if (extra_len > (u32)temp_len) break;
+                  if (extra_len > (u32)temp_len) break;
 
-                u32 insert_at = rand_below(afl, temp_len - extra_len + 1);
+                  u32 insert_at = rand_below(afl, temp_len - extra_len + 1);
 #ifdef INTROSPECTION
-                snprintf(afl->m_tmp, sizeof(afl->m_tmp),
-                         " EXTRA_OVERWRITE-%u-%u", insert_at, extra_len);
-                strcat(afl->mutation, afl->m_tmp);
+                  snprintf(afl->m_tmp, sizeof(afl->m_tmp),
+                           " EXTRA_OVERWRITE-%u-%u", insert_at, extra_len);
+                  strcat(afl->mutation, afl->m_tmp);
 #endif
-                memcpy(out_buf + insert_at, afl->extras[use_extra].data,
-                       extra_len);
+                  memcpy(out_buf + insert_at, afl->extras[use_extra].data,
+                         extra_len);
+
+                }
+
+                MOpt_globals.cycles_v2[STAGE_OverWriteExtra]++;
+
+                break;
 
               }
-
-              MOpt_globals.cycles_v2[STAGE_OverWriteExtra]++;
-
-              break;
-
-            }
 
               /* Insert an extra. */
 
-            case 17: {
+              else if (r == 1 && (afl->extras_cnt || afl->a_extras_cnt)) {
 
-              u32 use_extra, extra_len,
-                  insert_at = rand_below(afl, temp_len + 1);
-              u8 *ptr;
+                u32 use_extra, extra_len,
+                    insert_at = rand_below(afl, temp_len + 1);
+                u8 *ptr;
 
-              /* Insert an extra. Do the same dice-rolling stuff as for the
-                previous case. */
+                /* Insert an extra. Do the same dice-rolling stuff as for the
+                  previous case. */
 
-              if (!afl->extras_cnt ||
-                  (afl->a_extras_cnt && rand_below(afl, 2))) {
+                if (!afl->extras_cnt ||
+                    (afl->a_extras_cnt && rand_below(afl, 2))) {
 
-                use_extra = rand_below(afl, afl->a_extras_cnt);
-                extra_len = afl->a_extras[use_extra].len;
-                ptr = afl->a_extras[use_extra].data;
+                  use_extra = rand_below(afl, afl->a_extras_cnt);
+                  extra_len = afl->a_extras[use_extra].len;
+                  ptr = afl->a_extras[use_extra].data;
 #ifdef INTROSPECTION
-                snprintf(afl->m_tmp, sizeof(afl->m_tmp),
-                         " AUTO_EXTRA_INSERT-%u-%u", insert_at, extra_len);
-                strcat(afl->mutation, afl->m_tmp);
+                  snprintf(afl->m_tmp, sizeof(afl->m_tmp),
+                           " AUTO_EXTRA_INSERT-%u-%u", insert_at, extra_len);
+                  strcat(afl->mutation, afl->m_tmp);
 #endif
 
-              } else {
+                } else {
 
-                use_extra = rand_below(afl, afl->extras_cnt);
-                extra_len = afl->extras[use_extra].len;
-                ptr = afl->extras[use_extra].data;
+                  use_extra = rand_below(afl, afl->extras_cnt);
+                  extra_len = afl->extras[use_extra].len;
+                  ptr = afl->extras[use_extra].data;
 #ifdef INTROSPECTION
-                snprintf(afl->m_tmp, sizeof(afl->m_tmp), " EXTRA_INSERT-%u-%u",
-                         insert_at, extra_len);
-                strcat(afl->mutation, afl->m_tmp);
+                  snprintf(afl->m_tmp, sizeof(afl->m_tmp),
+                           " EXTRA_INSERT-%u-%u", insert_at, extra_len);
+                  strcat(afl->mutation, afl->m_tmp);
 #endif
 
-              }
+                }
 
-              if (temp_len + extra_len >= MAX_FILE) break;
+                if (temp_len + extra_len >= MAX_FILE) break;
 
-              out_buf = afl_realloc(AFL_BUF_PARAM(out), temp_len + extra_len);
-              if (unlikely(!out_buf)) { PFATAL("alloc"); }
-
-              /* Tail */
-              memmove(out_buf + insert_at + extra_len, out_buf + insert_at,
-                      temp_len - insert_at);
-
-              /* Inserted part */
-              memcpy(out_buf + insert_at, ptr, extra_len);
-
-              temp_len += extra_len;
-              MOpt_globals.cycles_v2[STAGE_InsertExtra]++;
-              break;
-
-            }
-
-            default: {
-
-              if (unlikely(afl->ready_for_splicing_count < 2)) break;
-
-              u32 tid;
-              do {
-
-                tid = rand_below(afl, afl->queued_paths);
-
-              } while (tid == afl->current_entry ||
-
-                       afl->queue_buf[tid]->len < 4);
-
-              /* Get the testcase for splicing. */
-              struct queue_entry *target = afl->queue_buf[tid];
-              u32                 new_len = target->len;
-              u8 *                new_buf = queue_testcase_get(afl, target);
-
-              if ((temp_len >= 2 && rand_below(afl, 2)) ||
-                  temp_len + HAVOC_BLK_XL >= MAX_FILE) {
-
-                /* overwrite mode */
-
-                u32 copy_from, copy_to, copy_len;
-
-                copy_len = choose_block_len(afl, new_len - 1);
-                if (copy_len > temp_len) copy_len = temp_len;
-
-                copy_from = rand_below(afl, new_len - copy_len + 1);
-                copy_to = rand_below(afl, temp_len - copy_len + 1);
-
-#ifdef INTROSPECTION
-                snprintf(afl->m_tmp, sizeof(afl->m_tmp),
-                         " SPLICE_OVERWRITE-%u-%u-%u-%s", copy_from, copy_to,
-                         copy_len, target->fname);
-                strcat(afl->mutation, afl->m_tmp);
-#endif
-                memmove(out_buf + copy_to, new_buf + copy_from, copy_len);
-
-              } else {
-
-                /* insert mode */
-
-                u32 clone_from, clone_to, clone_len;
-
-                clone_len = choose_block_len(afl, new_len);
-                clone_from = rand_below(afl, new_len - clone_len + 1);
-                clone_to = rand_below(afl, temp_len + 1);
-
-                u8 *temp_buf = afl_realloc(AFL_BUF_PARAM(out_scratch),
-                                           temp_len + clone_len + 1);
-                if (unlikely(!temp_buf)) { PFATAL("alloc"); }
-
-#ifdef INTROSPECTION
-                snprintf(afl->m_tmp, sizeof(afl->m_tmp),
-                         " SPLICE_INSERT-%u-%u-%u-%s", clone_from, clone_to,
-                         clone_len, target->fname);
-                strcat(afl->mutation, afl->m_tmp);
-#endif
-                /* Head */
-
-                memcpy(temp_buf, out_buf, clone_to);
-
-                /* Inserted part */
-
-                memcpy(temp_buf + clone_to, new_buf + clone_from, clone_len);
+                out_buf = afl_realloc(AFL_BUF_PARAM(out), temp_len + extra_len);
+                if (unlikely(!out_buf)) { PFATAL("alloc"); }
 
                 /* Tail */
-                memcpy(temp_buf + clone_to + clone_len, out_buf + clone_to,
-                       temp_len - clone_to);
+                memmove(out_buf + insert_at + extra_len, out_buf + insert_at,
+                        temp_len - insert_at);
 
-                out_buf = temp_buf;
-                afl_swap_bufs(AFL_BUF_PARAM(out), AFL_BUF_PARAM(out_scratch));
-                temp_len += clone_len;
+                /* Inserted part */
+                memcpy(out_buf + insert_at, ptr, extra_len);
+
+                temp_len += extra_len;
+                MOpt_globals.cycles_v2[STAGE_InsertExtra]++;
+                break;
+
+              } else {
+
+                if (unlikely(afl->ready_for_splicing_count < 2)) break;
+
+                u32 tid;
+                do {
+
+                  tid = rand_below(afl, afl->queued_items);
+
+                } while (tid == afl->current_entry ||
+
+                         afl->queue_buf[tid]->len < 4);
+
+                /* Get the testcase for splicing. */
+                struct queue_entry *target = afl->queue_buf[tid];
+                u32                 new_len = target->len;
+                u8                 *new_buf = queue_testcase_get(afl, target);
+
+                if ((temp_len >= 2 && rand_below(afl, 2)) ||
+                    temp_len + HAVOC_BLK_XL >= MAX_FILE) {
+
+                  /* overwrite mode */
+
+                  u32 copy_from, copy_to, copy_len;
+
+                  copy_len = choose_block_len(afl, new_len - 1);
+                  if (copy_len > temp_len) copy_len = temp_len;
+
+                  copy_from = rand_below(afl, new_len - copy_len + 1);
+                  copy_to = rand_below(afl, temp_len - copy_len + 1);
+
+#ifdef INTROSPECTION
+                  snprintf(afl->m_tmp, sizeof(afl->m_tmp),
+                           " SPLICE_OVERWRITE-%u-%u-%u-%s", copy_from, copy_to,
+                           copy_len, target->fname);
+                  strcat(afl->mutation, afl->m_tmp);
+#endif
+                  memmove(out_buf + copy_to, new_buf + copy_from, copy_len);
+
+                } else {
+
+                  /* insert mode */
+
+                  u32 clone_from, clone_to, clone_len;
+
+                  clone_len = choose_block_len(afl, new_len);
+                  clone_from = rand_below(afl, new_len - clone_len + 1);
+                  clone_to = rand_below(afl, temp_len + 1);
+
+                  u8 *temp_buf = afl_realloc(AFL_BUF_PARAM(out_scratch),
+                                             temp_len + clone_len + 1);
+                  if (unlikely(!temp_buf)) { PFATAL("alloc"); }
+
+#ifdef INTROSPECTION
+                  snprintf(afl->m_tmp, sizeof(afl->m_tmp),
+                           " SPLICE_INSERT-%u-%u-%u-%s", clone_from, clone_to,
+                           clone_len, target->fname);
+                  strcat(afl->mutation, afl->m_tmp);
+#endif
+                  /* Head */
+
+                  memcpy(temp_buf, out_buf, clone_to);
+
+                  /* Inserted part */
+
+                  memcpy(temp_buf + clone_to, new_buf + clone_from, clone_len);
+
+                  /* Tail */
+                  memcpy(temp_buf + clone_to + clone_len, out_buf + clone_to,
+                         temp_len - clone_to);
+
+                  out_buf = temp_buf;
+                  afl_swap_bufs(AFL_BUF_PARAM(out), AFL_BUF_PARAM(out_scratch));
+                  temp_len += clone_len;
+
+                }
+
+                MOpt_globals.cycles_v2[STAGE_Splice]++;
+                break;
 
               }
-
-              MOpt_globals.cycles_v2[STAGE_Splice]++;
-              break;
 
             }  // end of default:
 
@@ -5006,7 +5238,7 @@ pacemaker_fuzzing:
 
         ++*MOpt_globals.pTime;
 
-        u64 temp_total_found = afl->queued_paths + afl->unique_crashes;
+        u64 temp_total_found = afl->queued_items + afl->saved_crashes;
 
         if (common_fuzz_stuff(afl, out_buf, temp_len)) {
 
@@ -5025,7 +5257,7 @@ pacemaker_fuzzing:
         /* If we're finding new stuff, let's run for a bit longer, limits
            permitting. */
 
-        if (afl->queued_paths != havoc_queued) {
+        if (afl->queued_items != havoc_queued) {
 
           if (perf_score <= afl->havoc_max_mult * 100) {
 
@@ -5034,15 +5266,15 @@ pacemaker_fuzzing:
 
           }
 
-          havoc_queued = afl->queued_paths;
+          havoc_queued = afl->queued_items;
 
         }
 
-        if (unlikely(afl->queued_paths + afl->unique_crashes >
+        if (unlikely(afl->queued_items + afl->saved_crashes >
                      temp_total_found)) {
 
           u64 temp_temp_puppet =
-              afl->queued_paths + afl->unique_crashes - temp_total_found;
+              afl->queued_items + afl->saved_crashes - temp_total_found;
           afl->total_puppet_find = afl->total_puppet_find + temp_temp_puppet;
 
           if (MOpt_globals.is_pilot_mode) {
@@ -5076,7 +5308,7 @@ pacemaker_fuzzing:
 
            ++afl->stage_cur) { */
 
-      new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+      new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
       if (MOpt_globals.is_pilot_mode) {
 
@@ -5108,7 +5340,7 @@ pacemaker_fuzzing:
 
         struct queue_entry *target;
         u32                 tid, split_at;
-        u8 *                new_buf;
+        u8                 *new_buf;
         s32                 f_diff, l_diff;
 
         /* First of all, if we've modified in_buf for havoc, let's clean that
@@ -5126,7 +5358,7 @@ pacemaker_fuzzing:
 
         do {
 
-          tid = rand_below(afl, afl->queued_paths);
+          tid = rand_below(afl, afl->queued_items);
 
         } while (tid == afl->current_entry || afl->queue_buf[tid]->len < 4);
 
@@ -5212,8 +5444,8 @@ pacemaker_fuzzing:
       if (afl->key_puppet == 1) {
 
         if (unlikely(
-                afl->queued_paths + afl->unique_crashes >
-                ((afl->queued_paths + afl->unique_crashes) * limit_time_bound +
+                afl->queued_items + afl->saved_crashes >
+                ((afl->queued_items + afl->saved_crashes) * limit_time_bound +
                  afl->orig_hit_cnt_puppet))) {
 
           afl->key_puppet = 0;
@@ -5228,7 +5460,7 @@ pacemaker_fuzzing:
 
         afl->total_pacemaker_time += *MOpt_globals.pTime;
         *MOpt_globals.pTime = 0;
-        new_hit_cnt = afl->queued_paths + afl->unique_crashes;
+        new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
         if (MOpt_globals.is_pilot_mode) {
 
@@ -5239,7 +5471,6 @@ pacemaker_fuzzing:
         }
 
         afl->temp_puppet_find = afl->total_puppet_find;
-        u64 temp_stage_finds_puppet = 0;
         for (i = 0; i < operator_num; ++i) {
 
           if (MOpt_globals.is_pilot_mode) {
@@ -5265,7 +5496,6 @@ pacemaker_fuzzing:
 
           MOpt_globals.finds[i] = MOpt_globals.finds_v2[i];
           MOpt_globals.cycles[i] = MOpt_globals.cycles_v2[i];
-          temp_stage_finds_puppet += MOpt_globals.finds[i];
 
         }                                    /* for i = 0; i < operator_num */
 
@@ -5327,7 +5557,6 @@ pacemaker_fuzzing:
                 afl->core_operator_finds_puppet_v2[i];
             afl->core_operator_cycles_puppet[i] =
                 afl->core_operator_cycles_puppet_v2[i];
-            temp_stage_finds_puppet += afl->core_operator_finds_puppet[i];
 
           }
 

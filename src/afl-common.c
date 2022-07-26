@@ -9,13 +9,13 @@
                         Andrea Fioraldi <andreafioraldi@gmail.com>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
    Gather some functions common to multiple executables
 
@@ -25,8 +25,16 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#ifndef _GNU_SOURCE
+  #define _GNU_SOURCE
+#endif
+#ifndef __USE_GNU
+  #define __USE_GNU
+#endif
+#include <string.h>
 #include <strings.h>
 #include <math.h>
+#include <sys/mman.h>
 
 #include "debug.h"
 #include "alloc-inl.h"
@@ -34,13 +42,10 @@
 #include "common.h"
 
 /* Detect @@ in args. */
-#ifndef __glibc__
-  #include <unistd.h>
-#endif
+#include <unistd.h>
 #include <limits.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <fcntl.h>
 
 u8  be_quiet = 0;
@@ -50,6 +55,62 @@ u8  last_intr = 0;
 #ifndef AFL_PATH
   #define AFL_PATH "/usr/local/lib/afl/"
 #endif
+
+u32 check_binary_signatures(u8 *fn) {
+
+  int ret = 0, fd = open(fn, O_RDONLY);
+  if (fd < 0) { PFATAL("Unable to open '%s'", fn); }
+  struct stat st;
+  if (fstat(fd, &st) < 0) { PFATAL("Unable to fstat '%s'", fn); }
+  u32 f_len = st.st_size;
+  u8 *f_data = mmap(0, f_len, PROT_READ, MAP_PRIVATE, fd, 0);
+  if (f_data == MAP_FAILED) { PFATAL("Unable to mmap file '%s'", fn); }
+  close(fd);
+
+  if (memmem(f_data, f_len, PERSIST_SIG, strlen(PERSIST_SIG) + 1)) {
+
+    if (!be_quiet) { OKF(cPIN "Persistent mode binary detected."); }
+    setenv(PERSIST_ENV_VAR, "1", 1);
+    ret = 1;
+
+  } else if (getenv("AFL_PERSISTENT")) {
+
+    if (!be_quiet) { OKF(cPIN "Persistent mode enforced."); }
+    setenv(PERSIST_ENV_VAR, "1", 1);
+    ret = 1;
+
+  } else if (getenv("AFL_FRIDA_PERSISTENT_ADDR")) {
+
+    if (!be_quiet) {
+
+      OKF("FRIDA Persistent mode configuration options detected.");
+
+    }
+
+    setenv(PERSIST_ENV_VAR, "1", 1);
+    ret = 1;
+
+  }
+
+  if (memmem(f_data, f_len, DEFER_SIG, strlen(DEFER_SIG) + 1)) {
+
+    if (!be_quiet) { OKF(cPIN "Deferred forkserver binary detected."); }
+    setenv(DEFER_ENV_VAR, "1", 1);
+    ret += 2;
+
+  } else if (getenv("AFL_DEFER_FORKSRV")) {
+
+    if (!be_quiet) { OKF(cPIN "Deferred forkserver enforced."); }
+    setenv(DEFER_ENV_VAR, "1", 1);
+    ret += 2;
+
+  }
+
+  if (munmap(f_data, f_len)) { PFATAL("unmap() failed"); }
+
+  return ret;
+
+}
 
 void detect_file_args(char **argv, u8 *prog_in, bool *use_stdin) {
 
@@ -140,6 +201,35 @@ void argv_cpy_free(char **argv) {
 
 }
 
+/* Rewrite argv for CoreSight process tracer. */
+
+char **get_cs_argv(u8 *own_loc, u8 **target_path_p, int argc, char **argv) {
+
+  if (unlikely(getenv("AFL_CS_CUSTOM_BIN"))) {
+
+    WARNF(
+        "AFL_CS_CUSTOM_BIN is enabled. "
+        "You must run your target under afl-cs-proxy on your own!");
+    return argv;
+
+  }
+
+  char **new_argv = ck_alloc(sizeof(char *) * (argc + 4));
+  if (unlikely(!new_argv)) { FATAL("Illegal amount of arguments specified"); }
+
+  memcpy(&new_argv[3], &argv[1], (int)(sizeof(char *)) * (argc - 1));
+  new_argv[argc + 3] = NULL;
+
+  new_argv[2] = *target_path_p;
+  new_argv[1] = "--";
+
+  /* Now we need to actually find the cs-proxy binary to put in argv[0]. */
+
+  *target_path_p = new_argv[0] = find_afl_binary(own_loc, "afl-cs-proxy");
+  return new_argv;
+
+}
+
 /* Rewrite argv for QEMU. */
 
 char **get_qemu_argv(u8 *own_loc, u8 **target_path_p, int argc, char **argv) {
@@ -153,11 +243,10 @@ char **get_qemu_argv(u8 *own_loc, u8 **target_path_p, int argc, char **argv) {
 
   }
 
-  char **new_argv = ck_alloc(sizeof(char *) * (argc + 4));
+  char **new_argv = ck_alloc(sizeof(char *) * (argc + 3));
   if (unlikely(!new_argv)) { FATAL("Illegal amount of arguments specified"); }
 
   memcpy(&new_argv[3], &argv[1], (int)(sizeof(char *)) * (argc - 1));
-  new_argv[argc + 3] = NULL;
 
   new_argv[2] = *target_path_p;
   new_argv[1] = "--";
@@ -173,11 +262,10 @@ char **get_qemu_argv(u8 *own_loc, u8 **target_path_p, int argc, char **argv) {
 
 char **get_wine_argv(u8 *own_loc, u8 **target_path_p, int argc, char **argv) {
 
-  char **new_argv = ck_alloc(sizeof(char *) * (argc + 3));
+  char **new_argv = ck_alloc(sizeof(char *) * (argc + 2));
   if (unlikely(!new_argv)) { FATAL("Illegal amount of arguments specified"); }
 
   memcpy(&new_argv[2], &argv[1], (int)(sizeof(char *)) * (argc - 1));
-  new_argv[argc + 2] = NULL;
 
   new_argv[1] = *target_path_p;
 
@@ -470,18 +558,26 @@ void print_suggested_envs(char *mispelled_env) {
 
   for (j = 0; afl_environment_variables[j] != NULL; ++j) {
 
-    char * afl_env = afl_environment_variables[j] + 4;
+    char  *afl_env = afl_environment_variables[j] + 4;
     size_t afl_env_len = strlen(afl_env);
-    char * reduced = ck_alloc(afl_env_len + 1);
+    char  *reduced = ck_alloc(afl_env_len + 1);
 
     size_t start = 0;
     while (start < afl_env_len) {
 
       size_t end = start + strcspn(afl_env + start, "_") + 1;
       memcpy(reduced, afl_env, start);
-      if (end < afl_env_len)
+      if (end < afl_env_len) {
+
         memcpy(reduced + start, afl_env + end, afl_env_len - end);
-      reduced[afl_env_len - end + start] = 0;
+
+      }
+
+      if (afl_env_len + start >= end) {
+
+        reduced[afl_env_len - end + start] = 0;
+
+      }
 
       int distance = string_distance_levenshtein(reduced, env_name);
       if (distance < ENV_SIMILARITY_TRESHOLD && seen[j] == 0) {
@@ -502,7 +598,7 @@ void print_suggested_envs(char *mispelled_env) {
 
   if (found) goto cleanup;
 
-  char * reduced = ck_alloc(env_name_len + 1);
+  char  *reduced = ck_alloc(env_name_len + 1);
   size_t start = 0;
   while (start < env_name_len) {
 
@@ -623,17 +719,23 @@ char *get_afl_env(char *env) {
 
   char *val;
 
-  if ((val = getenv(env)) != NULL) {
+  if ((val = getenv(env))) {
 
-    if (!be_quiet) {
+    if (*val) {
 
-      OKF("Loaded environment variable %s with value %s", env, val);
+      if (!be_quiet) {
+
+        OKF("Enabled environment variable %s with value %s", env, val);
+
+      }
+
+      return val;
 
     }
 
   }
 
-  return val;
+  return NULL;
 
 }
 
@@ -713,10 +815,7 @@ bool extract_and_set_env(u8 *env_str) {
     *rest = '\0';  // done with variable value
 
     rest += 1;
-    if (rest < end && *rest != ' ') { goto free_and_return; }
-
     num_pairs++;
-
     setenv(key, val, 1);
 
   }
@@ -742,6 +841,8 @@ void read_bitmap(u8 *fname, u8 *map, size_t len) {
   close(fd);
 
 }
+
+/* Get unix time in milliseconds */
 
 u64 get_cur_time(void) {
 
@@ -1096,7 +1197,7 @@ u8 *u_stringify_time_diff(u8 *buf, u64 cur_ms, u64 event_ms) {
 u32 get_map_size(void) {
 
   uint32_t map_size = DEFAULT_SHMEM_SIZE;
-  char *   ptr;
+  char    *ptr;
 
   if ((ptr = getenv("AFL_MAP_SIZE")) || (ptr = getenv("AFL_MAPSIZE"))) {
 
@@ -1109,6 +1210,10 @@ u32 get_map_size(void) {
     }
 
     if (map_size % 64) { map_size = (((map_size >> 6) + 1) << 6); }
+
+  } else if (getenv("AFL_SKIP_BIN_CHECK")) {
+
+    map_size = MAP_SIZE;
 
   }
 

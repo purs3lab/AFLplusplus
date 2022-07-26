@@ -12,13 +12,13 @@
                      Dominik Maier <mail@dmnk.co>>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
    Shared code that implements a forkserver. This is used by the fuzzer
    as well the other components like afl-tmin.
@@ -32,6 +32,50 @@
 #include <stdbool.h>
 
 #include "types.h"
+
+#ifdef __linux__
+/**
+ * Nyx related typedefs taken from libnyx.h
+ */
+
+typedef enum NyxReturnValue {
+
+  Normal,
+  Crash,
+  Asan,
+  Timout,
+  InvalidWriteToPayload,
+  Error,
+  IoError,
+  Abort,
+
+} NyxReturnValue;
+
+typedef struct {
+
+  void *(*nyx_new)(const char *sharedir, const char *workdir, uint32_t cpu_id,
+                   uint32_t input_buffer_size,
+                   bool     input_buffer_write_protection);
+  void *(*nyx_new_parent)(const char *sharedir, const char *workdir,
+                          uint32_t cpu_id, uint32_t input_buffer_size,
+                          bool input_buffer_write_protection);
+  void *(*nyx_new_child)(const char *sharedir, const char *workdir,
+                         uint32_t cpu_id, uint32_t worker_id);
+  void (*nyx_shutdown)(void *qemu_process);
+  void (*nyx_option_set_reload_mode)(void *qemu_process, bool enable);
+  void (*nyx_option_set_timeout)(void *qemu_process, uint8_t timeout_sec,
+                                 uint32_t timeout_usec);
+  void (*nyx_option_apply)(void *qemu_process);
+  void (*nyx_set_afl_input)(void *qemu_process, uint8_t *buffer, uint32_t size);
+  enum NyxReturnValue (*nyx_exec)(void *qemu_process);
+  uint8_t *(*nyx_get_bitmap_buffer)(void *qemu_process);
+  size_t (*nyx_get_bitmap_buffer_size)(void *qemu_process);
+  uint32_t (*nyx_get_aux_string)(void *nyx_process, uint8_t *buffer,
+                                 uint32_t size);
+
+} nyx_plugin_handler_t;
+
+#endif
 
 typedef struct afl_forkserver {
 
@@ -54,6 +98,7 @@ typedef struct afl_forkserver {
   u32 exec_tmout;                       /* Configurable exec timeout (ms)   */
   u32 init_tmout;                       /* Configurable init timeout (ms)   */
   u32 map_size;                         /* map size used by the target      */
+  u32 real_map_size;                    /* real map size, unaligned         */
   u32 snapshot;                         /* is snapshot feature used         */
   u64 mem_limit;                        /* Memory cap for child (MB)        */
 
@@ -79,6 +124,10 @@ typedef struct afl_forkserver {
 
   bool frida_mode;                     /* if running in frida mode or not   */
 
+  bool frida_asan;                    /* if running with asan in frida mode */
+
+  bool cs_mode;                      /* if running in CoreSight mode or not */
+
   bool use_stdin;                       /* use stdin for sending data       */
 
   bool no_unlink;                       /* do not unlink cur_input          */
@@ -101,7 +150,7 @@ typedef struct afl_forkserver {
 #ifdef AFL_PERSISTENT_RECORD
   u32  persistent_record_idx;           /* persistent replay cache ptr      */
   u32  persistent_record_cnt;           /* persistent replay counter        */
-  u8 * persistent_record_dir;
+  u8  *persistent_record_dir;
   u8 **persistent_record_data;
   u32 *persistent_record_len;
   s32  persistent_record_pid;
@@ -115,6 +164,19 @@ typedef struct afl_forkserver {
   void (*add_extra_func)(void *afl_ptr, u8 *mem, u32 len);
 
   u8 kill_signal;
+  u8 persistent_mode;
+
+#ifdef __linux__
+  nyx_plugin_handler_t *nyx_handlers;
+  char                 *out_dir_path;    /* path to the output directory     */
+  u8                    nyx_mode;        /* if running in nyx mode or not    */
+  bool                  nyx_parent;      /* create initial snapshot          */
+  bool                  nyx_standalone;  /* don't serialize the snapshot     */
+  void                 *nyx_runner;      /* nyx runner object                */
+  u32                   nyx_id;          /* nyx runner id (0 -> master)      */
+  u32                   nyx_bind_cpu_id; /* nyx runner cpu id                */
+  char                 *nyx_aux_string;
+#endif
 
 } afl_forkserver_t;
 

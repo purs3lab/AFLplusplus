@@ -10,13 +10,13 @@
                         Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
    This is the real deal: the program takes an instrumented binary and
    attempts a variety of basic fuzzing tricks, paying close attention to
@@ -31,11 +31,50 @@ struct custom_mutator *load_custom_mutator(afl_state_t *, const char *);
 struct custom_mutator *load_custom_mutator_py(afl_state_t *, char *);
 #endif
 
+void run_afl_custom_queue_new_entry(afl_state_t *afl, struct queue_entry *q,
+                                    u8 *fname, u8 *mother_fname) {
+
+  if (afl->custom_mutators_count) {
+
+    u8 updated = 0;
+
+    LIST_FOREACH(&afl->custom_mutator_list, struct custom_mutator, {
+
+      if (el->afl_custom_queue_new_entry) {
+
+        if (el->afl_custom_queue_new_entry(el->data, fname, mother_fname)) {
+
+          updated = 1;
+
+        }
+
+      }
+
+    });
+
+    if (updated) {
+
+      struct stat st;
+      if (stat(fname, &st)) { PFATAL("File %s is gone!", fname); }
+      if (!st.st_size) {
+
+        FATAL("File %s became empty in custom mutator!", fname);
+
+      }
+
+      q->len = st.st_size;
+
+    }
+
+  }
+
+}
+
 void setup_custom_mutators(afl_state_t *afl) {
 
   /* Try mutator library first */
   struct custom_mutator *mutator;
-  u8 *                   fn = afl->afl_env.afl_custom_mutator_library;
+  u8                    *fn = afl->afl_env.afl_custom_mutator_library;
   u32                    prev_mutator_count = 0;
 
   if (fn) {
@@ -137,7 +176,7 @@ void destroy_custom_mutators(afl_state_t *afl) {
 
 struct custom_mutator *load_custom_mutator(afl_state_t *afl, const char *fn) {
 
-  void *                 dh;
+  void                  *dh;
   struct custom_mutator *mutator = ck_alloc(sizeof(struct custom_mutator));
 
   mutator->name = fn;
@@ -216,6 +255,7 @@ struct custom_mutator *load_custom_mutator(afl_state_t *afl, const char *fn) {
   mutator->afl_custom_init_trim = dlsym(dh, "afl_custom_init_trim");
   if (!mutator->afl_custom_init_trim) {
 
+    notrim = 1;
     ACTF("optional symbol 'afl_custom_init_trim' not found.");
 
   }
@@ -224,6 +264,7 @@ struct custom_mutator *load_custom_mutator(afl_state_t *afl, const char *fn) {
   mutator->afl_custom_trim = dlsym(dh, "afl_custom_trim");
   if (!mutator->afl_custom_trim) {
 
+    notrim = 1;
     ACTF("optional symbol 'afl_custom_trim' not found.");
 
   }
@@ -232,6 +273,7 @@ struct custom_mutator *load_custom_mutator(afl_state_t *afl, const char *fn) {
   mutator->afl_custom_post_trim = dlsym(dh, "afl_custom_post_trim");
   if (!mutator->afl_custom_post_trim) {
 
+    notrim = 1;
     ACTF("optional symbol 'afl_custom_post_trim' not found.");
 
   }
@@ -386,13 +428,14 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
     if (likely(retlen)) {
 
-      write_to_testcase(afl, retbuf, retlen);
+      retlen = write_to_testcase(afl, (void **)&retbuf, retlen, 0);
 
       fault = fuzz_run_target(afl, &afl->fsrv, afl->fsrv.exec_tmout);
       ++afl->trim_execs;
 
       if (afl->stop_soon || fault == FSRV_RUN_ERROR) { goto abort_trimming; }
 
+      classify_counts(&afl->fsrv);
       cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
 
     }
@@ -417,6 +460,8 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
       }
 
       out_len = retlen;
+      // TODO are we sure that retbuf fits into out_buf if retbuf can actually
+      // increase in size?
       memcpy(out_buf, retbuf, retlen);
 
       /* Tell the custom mutator that the trimming was successful */

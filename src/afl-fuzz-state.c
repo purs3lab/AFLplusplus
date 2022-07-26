@@ -9,13 +9,13 @@
                         Andrea Fioraldi <andreafioraldi@gmail.com>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
    This is the real deal: the program takes an instrumented binary and
    attempts a variety of basic fuzzing tricks, paying close attention to
@@ -96,14 +96,15 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
   afl->splicing_with = -1;              /* Splicing with which test case?   */
   afl->cpu_to_bind = -1;
   afl->havoc_stack_pow2 = HAVOC_STACK_POW2;
-  afl->cal_cycles = CAL_CYCLES;
-  afl->cal_cycles_long = CAL_CYCLES_LONG;
   afl->hang_tmout = EXEC_TIMEOUT;
   afl->exit_on_time = 0;
   afl->stats_update_freq = 1;
   afl->stats_avg_exec = 0;
   afl->skip_deterministic = 1;
+  afl->sync_time = SYNC_TIME;
   afl->cmplog_lvl = 2;
+  afl->min_length = 1;
+  afl->max_length = MAX_FILE;
 #ifndef NO_SPLICING
   afl->use_splicing = 1;
 #endif
@@ -202,12 +203,18 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
             afl->afl_env.afl_no_affinity =
                 get_afl_env(afl_environment_variables[i]) ? 1 : 0;
 
+          } else if (!strncmp(env, "AFL_TRY_AFFINITY",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_try_affinity =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
           } else if (!strncmp(env, "AFL_SKIP_CRASHES",
 
                               afl_environment_variable_len)) {
 
-            afl->afl_env.afl_skip_crashes =
-                (u8 *)get_afl_env(afl_environment_variables[i]);
+            // we should mark this obsolete in a few versions
 
           } else if (!strncmp(env, "AFL_HANG_TMOUT",
 
@@ -215,6 +222,13 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
 
             afl->afl_env.afl_hang_tmout =
                 (u8 *)get_afl_env(afl_environment_variables[i]);
+
+          } else if (!strncmp(env, "AFL_KEEP_TIMEOUTS",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_keep_timeouts =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
 
           } else if (!strncmp(env, "AFL_SKIP_BIN_CHECK",
 
@@ -261,6 +275,13 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
                               afl_environment_variable_len)) {
 
             afl->afl_env.afl_force_ui =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
+          } else if (!strncmp(env, "AFL_IGNORE_PROBLEMS",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_ignore_problems =
                 get_afl_env(afl_environment_variables[i]) ? 1 : 0;
 
           } else if (!strncmp(env, "AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES",
@@ -329,6 +350,13 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
                 get_afl_env(afl_environment_variables[i]) ? 1 : 0;
 
           } else if (!strncmp(env, "AFL_CAL_FAST",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_cal_fast =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
+          } else if (!strncmp(env, "AFL_FAST_CAL",
 
                               afl_environment_variable_len)) {
 
@@ -462,6 +490,62 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
             afl->afl_env.afl_target_env =
                 (u8 *)get_afl_env(afl_environment_variables[i]);
 
+          } else if (!strncmp(env, "AFL_INPUT_LEN_MIN",
+
+                              afl_environment_variable_len)) {
+
+            afl->min_length =
+                atoi((u8 *)get_afl_env(afl_environment_variables[i]));
+
+          } else if (!strncmp(env, "AFL_INPUT_LEN_MAX",
+
+                              afl_environment_variable_len)) {
+
+            afl->max_length =
+                atoi((u8 *)get_afl_env(afl_environment_variables[i]));
+
+          } else if (!strncmp(env, "AFL_PIZZA_MODE",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_pizza_mode =
+                atoi((u8 *)get_afl_env(afl_environment_variables[i]));
+
+          } else if (!strncmp(env, "AFL_NO_CRASH_README",
+
+                              afl_environment_variable_len)) {
+
+            afl->afl_env.afl_no_crash_readme =
+                atoi((u8 *)get_afl_env(afl_environment_variables[i]));
+
+            if (afl->afl_env.afl_pizza_mode == 0) {
+
+              afl->afl_env.afl_pizza_mode = 1;
+
+            } else {
+
+              afl->pizza_is_served = 1;
+
+            }
+
+          } else if (!strncmp(env, "AFL_SYNC_TIME",
+
+                              afl_environment_variable_len)) {
+
+            int time = atoi((u8 *)get_afl_env(afl_environment_variables[i]));
+            if (time > 0) {
+
+              afl->sync_time = time * (60 * 1000LL);
+
+            } else {
+
+              WARNF(
+                  "incorrect value for AFL_SYNC_TIME environment variable, "
+                  "used default value %lld instead.",
+                  afl->sync_time / 60 / 1000);
+
+            }
+
           }
 
         } else {
@@ -535,6 +619,7 @@ void afl_state_deinit(afl_state_t *afl) {
   if (afl->sync_id) { ck_free(afl->out_dir); }
   if (afl->pass_stats) { ck_free(afl->pass_stats); }
   if (afl->orig_cmp_map) { ck_free(afl->orig_cmp_map); }
+  if (afl->cmplog_binary) { ck_free(afl->cmplog_binary); }
 
   afl_free(afl->queue_buf);
   afl_free(afl->out_buf);

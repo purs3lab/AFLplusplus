@@ -4,14 +4,6 @@
 
 $ECHO "$BLUE[*] Testing: llvm_mode, afl-showmap, afl-fuzz, afl-cmin and afl-tmin"
 test -e ../afl-clang-fast -a -e ../split-switches-pass.so && {
-  # on FreeBSD need to set AFL_CC
-  test `uname -s` = 'FreeBSD' && {
-    if type clang >/dev/null; then
-      export AFL_CC=`command -v clang`
-    else
-      export AFL_CC=`$LLVM_CONFIG --bindir`/clang
-    fi
-  }
   ../afl-clang-fast -o test-instr.plain ../test-instr.c > /dev/null 2>&1
   AFL_HARDEN=1 ../afl-clang-fast -o test-compcov.harden test-compcov.c > /dev/null 2>&1
   test -e test-instr.plain && {
@@ -43,27 +35,57 @@ test -e ../afl-clang-fast -a -e ../split-switches-pass.so && {
     $ECHO "$RED[!] llvm_mode failed"
     CODE=1
   }
+  AFL_LLVM_INSTRUMENT=CLASSIC AFL_LLVM_THREADSAFE_INST=1 ../afl-clang-fast -o test-instr.ts ../test-instr.c > /dev/null 2>&1
+  test -e test-instr.ts && {
+    $ECHO "$GREEN[+] llvm_mode threadsafe compilation succeeded"
+    echo 0 | AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-instr.ts.0 -r -- ./test-instr.ts > /dev/null 2>&1
+    AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-instr.ts.1 -r -- ./test-instr.ts < /dev/null > /dev/null 2>&1
+    test -e test-instr.ts.0 -a -e test-instr.ts.1 && {
+      diff test-instr.ts.0 test-instr.ts.1 > /dev/null 2>&1 && {
+        $ECHO "$RED[!] llvm_mode threadsafe instrumentation should be different on different input but is not"
+        CODE=1
+      } || {
+        $ECHO "$GREEN[+] llvm_mode threadsafe instrumentation present and working correctly"
+        TUPLES=`echo 0|AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o /dev/null -- ./test-instr.ts 2>&1 | grep Captur | awk '{print$3}'`
+        test "$TUPLES" -gt 2 -a "$TUPLES" -lt 8 && {
+          $ECHO "$GREEN[+] llvm_mode run reported $TUPLES threadsafe instrumented locations which is fine"
+        } || {
+          $ECHO "$RED[!] llvm_mode threadsafe instrumentation produces weird numbers: $TUPLES"
+          CODE=1
+        }
+        test "$TUPLES" -lt 3 && SKIP=1
+        true
+      }
+    } || {
+      $ECHO "$RED[!] llvm_mode threadsafe instrumentation failed"
+      CODE=1
+    }
+    rm -f test-instr.ts.0 test-instr.ts.1
+  } || {
+    $ECHO "$RED[!] llvm_mode (threadsafe) failed"
+    CODE=1
+  }
   ../afl-clang-fast -DTEST_SHARED_OBJECT=1 -z defs -fPIC -shared -o test-instr.so ../test-instr.c > /dev/null 2>&1
   test -e test-instr.so && {
     $ECHO "$GREEN[+] llvm_mode shared object with -z defs compilation succeeded"
-    test `uname -s` = 'Linux' && LIBS=-ldl :
+    test `uname -s` = 'Linux' && LIBS=-ldl
     ../afl-clang-fast -o test-dlopen.plain test-dlopen.c ${LIBS} > /dev/null 2>&1
     test -e test-dlopen.plain && {
       $ECHO "$GREEN[+] llvm_mode test-dlopen compilation succeeded"
-      echo 0 | TEST_DLOPEN_TARGET=./test-instr.so AFL_QUIET=1 ./test-dlopen.plain > /dev/null 2>&1
+      echo 0 | DYLD_INSERT_LIBRARIES=./test-instr.so LD_PRELOAD=./test-instr.so TEST_DLOPEN_TARGET=./test-instr.so AFL_QUIET=1 ./test-dlopen.plain > /dev/null 2>&1
       if [ $? -ne 0 ]; then
         $ECHO "$RED[!] llvm_mode test-dlopen exits with an error"
         CODE=1
       fi
-      echo 0 | TEST_DLOPEN_TARGET=./test-instr.so AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-dlopen.plain.0 -r -- ./test-dlopen.plain > /dev/null 2>&1
-      TEST_DLOPEN_TARGET=./test-instr.so AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-dlopen.plain.1 -r -- ./test-dlopen.plain < /dev/null > /dev/null 2>&1
+      echo 0 | AFL_PRELOAD=./test-instr.so TEST_DLOPEN_TARGET=./test-instr.so AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-dlopen.plain.0 -r -- ./test-dlopen.plain > /dev/null 2>&1
+      AFL_PRELOAD=./test-instr.so TEST_DLOPEN_TARGET=./test-instr.so AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o test-dlopen.plain.1 -r -- ./test-dlopen.plain < /dev/null > /dev/null 2>&1
       test -e test-dlopen.plain.0 -a -e test-dlopen.plain.1 && {
         diff test-dlopen.plain.0 test-dlopen.plain.1 > /dev/null 2>&1 && {
           $ECHO "$RED[!] llvm_mode test-dlopen instrumentation should be different on different input but is not"
           CODE=1
         } || {
           $ECHO "$GREEN[+] llvm_mode test-dlopen instrumentation present and working correctly"
-          TUPLES=`echo 0|TEST_DLOPEN_TARGET=./test-instr.so AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o /dev/null -- ./test-dlopen.plain 2>&1 | grep Captur | awk '{print$3}'`
+          TUPLES=`echo 0|AFL_PRELOAD=./test-instr.so TEST_DLOPEN_TARGET=./test-instr.so AFL_QUIET=1 ../afl-showmap -m ${MEM_LIMIT} -o /dev/null -- ./test-dlopen.plain 2>&1 | grep Captur | awk '{print$3}'`
           test "$TUPLES" -gt 3 -a "$TUPLES" -lt 12 && {
             $ECHO "$GREEN[+] llvm_mode test-dlopen run reported $TUPLES instrumented locations which is fine"
           } || {
@@ -88,7 +110,7 @@ test -e ../afl-clang-fast -a -e ../split-switches-pass.so && {
     CODE=1
   }
   test -e test-compcov.harden && test_compcov_binary_functionality ./test-compcov.harden && {
-    grep -Eq$GREPAOPTION 'stack_chk_fail|fstack-protector-all|fortified' test-compcov.harden > /dev/null 2>&1 && {
+    nm test-compcov.harden | grep -Eq 'stack_chk_fail|fstack-protector-all|fortified' > /dev/null 2>&1 && {
       $ECHO "$GREEN[+] llvm_mode hardened mode succeeded and is working"
     } || {
       $ECHO "$RED[!] llvm_mode hardened mode is not hardened"
@@ -100,10 +122,6 @@ test -e ../afl-clang-fast -a -e ../split-switches-pass.so && {
     CODE=1
   }
   # now we want to be sure that afl-fuzz is working
-  (test "$(uname -s)" = "Linux" && test "$(sysctl kernel.core_pattern)" != "kernel.core_pattern = core" && {
-    $ECHO "$YELLOW[-] we should not run afl-fuzz with enabled core dumps. Run 'sudo sh afl-system-config'.$RESET"
-    true
-  }) ||
   # make sure crash reporter is disabled on Mac OS X
   (test "$(uname -s)" = "Darwin" && test $(launchctl list 2>/dev/null | grep -q '\.ReportCrash$') && {
     $ECHO "$RED[!] we cannot run afl-fuzz with enabled crash reporter. Run 'sudo sh afl-system-config'.$RESET"
@@ -168,6 +186,29 @@ test -e ../afl-clang-fast -a -e ../split-switches-pass.so && {
   }
   rm -f test-instr.plain
 
+  $ECHO "$GREY[*] llvm_mode laf-intel/compcov testing splitting integer types (this might take some time)"
+  for testcase in ./test-int_cases.c ./test-uint_cases.c; do
+    for I in char short int long "long long"; do
+      for BITS in 8 16 32 64; do
+        bin="$testcase-split-$I-$BITS.compcov" 
+        AFL_LLVM_INSTRUMENT=AFL AFL_DEBUG=1 AFL_LLVM_LAF_SPLIT_COMPARES_BITW=$BITS AFL_LLVM_LAF_SPLIT_COMPARES=1 ../afl-clang-fast -fsigned-char -DINT_TYPE="$I" -o "$bin" "$testcase" > test.out 2>&1;
+        if ! test -e "$bin"; then
+            cat test.out
+            $ECHO "$RED[!] llvm_mode laf-intel/compcov integer splitting failed! ($testcase with type $I split to $BITS)!";
+            CODE=1
+            break
+        fi
+        if ! "$bin"; then
+            $ECHO "$RED[!] llvm_mode laf-intel/compcov integer splitting resulted in miscompilation (type $I split to $BITS)!";
+            CODE=1
+            break
+        fi
+        rm -f "$bin" test.out || true
+      done
+    done
+  done
+  rm -f test-int-split*.compcov test.out
+
   AFL_LLVM_INSTRUMENT=AFL AFL_DEBUG=1 AFL_LLVM_LAF_SPLIT_SWITCHES=1 AFL_LLVM_LAF_TRANSFORM_COMPARES=1 AFL_LLVM_LAF_SPLIT_COMPARES=1 ../afl-clang-fast -o test-compcov.compcov test-compcov.c > test.out 2>&1
   test -e test-compcov.compcov && test_compcov_binary_functionality ./test-compcov.compcov && {
     grep --binary-files=text -Eq " [ 123][0-9][0-9] location| [3-9][0-9] location" test.out && {
@@ -220,7 +261,7 @@ test -e ../afl-clang-fast -a -e ../split-switches-pass.so && {
     $ECHO "$GREY[*] running afl-fuzz for llvm_mode cmplog, this will take approx 10 seconds"
     {
       mkdir -p in
-      echo 0000000000000000000000000 > in/in
+      echo 00000000000000000000000000000000 > in/in
       AFL_BENCH_UNTIL_CRASH=1 ../afl-fuzz -m none -V60 -i in -o out -c./test-cmplog -- ./test-cmplog >>errors 2>&1
     } >>errors 2>&1
     test -n "$( ls out/default/crashes/id:000000* out/default/hangs/id:000000* 2>/dev/null )" & {

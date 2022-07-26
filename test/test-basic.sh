@@ -44,10 +44,13 @@ test "$SYS" = "i686" -o "$SYS" = "x86_64" -o "$SYS" = "amd64" -o "$SYS" = "i86pc
     CODE=1
   }
   test -e test-compcov.harden && {
-    grep -Eq$GREPAOPTION 'stack_chk_fail|fstack-protector-all|fortified' test-compcov.harden > /dev/null 2>&1 && {
+    nm test-compcov.harden | grep -Eq 'stack_chk_fail|fstack-protector-all|fortified' > /dev/null 2>&1 && {
       $ECHO "$GREEN[+] ${AFL_GCC} hardened mode succeeded and is working"
     } || {
       $ECHO "$RED[!] ${AFL_GCC} hardened mode is not hardened"
+      env | egrep 'AFL|PATH|LLVM'
+      AFL_DEBUG=1 AFL_HARDEN=1 ../${AFL_GCC} -o test-compcov.harden test-compcov.c
+      nm test-compcov.harden
       CODE=1
     }
     rm -f test-compcov.harden
@@ -56,11 +59,6 @@ test "$SYS" = "i686" -o "$SYS" = "x86_64" -o "$SYS" = "amd64" -o "$SYS" = "i86pc
     CODE=1
   }
   # now we want to be sure that afl-fuzz is working
-  # make sure core_pattern is set to core on linux
-  (test "$(uname -s)" = "Linux" && test "$(sysctl kernel.core_pattern)" != "kernel.core_pattern = core" && {
-    $ECHO "$YELLOW[-] we should not run afl-fuzz with enabled core dumps. Run 'sudo sh afl-system-config'.$RESET"
-    true
-  }) ||
   # make sure crash reporter is disabled on Mac OS X
   (test "$(uname -s)" = "Darwin" && test $(launchctl list 2>/dev/null | grep -q '\.ReportCrash$') && {
     $ECHO "$RED[!] we cannot run afl-fuzz with enabled crash reporter. Run 'sudo sh afl-system-config'.$RESET"
@@ -164,7 +162,7 @@ test "$SYS" = "i686" -o "$SYS" = "x86_64" -o "$SYS" = "amd64" -o "$SYS" = "i86pc
     CODE=1
   }
   test -e test-compcov.harden && {
-    grep -Eq$GREPAOPTION 'stack_chk_fail|fstack-protector-all|fortified' test-compcov.harden > /dev/null 2>&1 && {
+    nm test-compcov.harden | grep -Eq 'stack_chk_fail|fstack-protector-all|fortified' > /dev/null 2>&1 && {
       $ECHO "$GREEN[+] ${AFL_GCC} hardened mode succeeded and is working"
     } || {
       $ECHO "$RED[!] ${AFL_GCC} hardened mode is not hardened"
@@ -176,11 +174,6 @@ test "$SYS" = "i686" -o "$SYS" = "x86_64" -o "$SYS" = "amd64" -o "$SYS" = "i86pc
     CODE=1
   }
   # now we want to be sure that afl-fuzz is working
-  # make sure core_pattern is set to core on linux
-  (test "$(uname -s)" = "Linux" && test "$(sysctl kernel.core_pattern)" != "kernel.core_pattern = core" && {
-    $ECHO "$YELLOW[-] we should not run afl-fuzz with enabled core dumps. Run 'sudo sh afl-system-config'.$RESET"
-    true
-  }) ||
   # make sure crash reporter is disabled on Mac OS X
   (test "$(uname -s)" = "Darwin" && test $(launchctl list 2>/dev/null | grep -q '\.ReportCrash$') && {
     $ECHO "$RED[!] we cannot run afl-fuzz with enabled crash reporter. Run 'sudo sh afl-system-config'.$RESET"

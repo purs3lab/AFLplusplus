@@ -12,7 +12,7 @@
                         Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -60,7 +60,7 @@
 
 #ifdef USE_DEFLATE
   #include <libdeflate.h>
-struct libdeflate_compressor *  compressor;
+struct libdeflate_compressor   *compressor;
 struct libdeflate_decompressor *decompressor;
 #endif
 
@@ -387,8 +387,8 @@ int main(int argc, char **argv_orig, char **envp) {
   struct sockaddr_in6 serveraddr, clientaddr;
   int                 addrlen = sizeof(clientaddr);
   char                str[INET6_ADDRSTRLEN];
-  char **             argv = argv_cpy_dup(argc, argv_orig);
-  u8 *                send_buf;
+  char              **argv = argv_cpy_dup(argc, argv_orig);
+  u8                 *send_buf;
 #ifdef USE_DEFLATE
   u32 *lenptr;
 #endif

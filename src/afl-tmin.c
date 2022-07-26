@@ -12,13 +12,13 @@
                         Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
    A simple test case minimizer that takes an input file and tries to remove
    as much data as possible while keeping the binary in a crashing state
@@ -86,7 +86,7 @@ static volatile u8 stop_soon;          /* Ctrl-C pressed?                   */
 
 static afl_forkserver_t *fsrv;
 static sharedmem_t       shm;
-static sharedmem_t *     shm_fuzz;
+static sharedmem_t      *shm_fuzz;
 
 /*
  * forkserver section
@@ -95,33 +95,33 @@ static sharedmem_t *     shm_fuzz;
 /* Classify tuple counts. This is a slow & naive version, but good enough here.
  */
 
-#define TIMES4(x) x, x, x, x
-#define TIMES8(x) TIMES4(x), TIMES4(x)
-#define TIMES16(x) TIMES8(x), TIMES8(x)
-#define TIMES32(x) TIMES16(x), TIMES16(x)
-#define TIMES64(x) TIMES32(x), TIMES32(x)
 static const u8 count_class_lookup[256] = {
 
     [0] = 0,
     [1] = 1,
     [2] = 2,
     [3] = 4,
-    [4] = TIMES4(8),
-    [8] = TIMES8(16),
-    [16] = TIMES16(32),
-    [32] = TIMES32(64),
-    [128] = TIMES64(128)
+    [4 ... 7] = 8,
+    [8 ... 15] = 16,
+    [16 ... 31] = 32,
+    [32 ... 127] = 64,
+    [128 ... 255] = 128
 
 };
 
-#undef TIMES64
-#undef TIMES32
-#undef TIMES16
-#undef TIMES8
-#undef TIMES4
+static void kill_child() {
+
+  if (fsrv->child_pid > 0) {
+
+    kill(fsrv->child_pid, fsrv->kill_signal);
+    fsrv->child_pid = -1;
+
+  }
+
+}
 
 static sharedmem_t *deinit_shmem(afl_forkserver_t *fsrv,
-                                 sharedmem_t *     shm_fuzz) {
+                                 sharedmem_t      *shm_fuzz) {
 
   afl_shm_deinit(shm_fuzz);
   fsrv->support_shmem_fuzz = 0;
@@ -221,7 +221,7 @@ static void read_initial_file(void) {
 
   if (st.st_size >= TMIN_MAX_FILE) {
 
-    FATAL("Input file is too large (%u MB max)", TMIN_MAX_FILE / 1024 / 1024);
+    FATAL("Input file is too large (%ld MB max)", TMIN_MAX_FILE / 1024 / 1024);
 
   }
 
@@ -642,7 +642,7 @@ static void handle_stop_sig(int sig) {
 
 static void set_up_environment(afl_forkserver_t *fsrv, char **argv) {
 
-  u8 *  x;
+  u8   *x;
   char *afl_preload;
   char *frida_afl_preload = NULL;
 
@@ -797,6 +797,8 @@ static void set_up_environment(afl_forkserver_t *fsrv, char **argv) {
 
     } else {
 
+      /* CoreSight mode uses the default behavior. */
+
       setenv("LD_PRELOAD", getenv("AFL_PRELOAD"), 1);
       setenv("DYLD_INSERT_LIBRARIES", getenv("AFL_PRELOAD"), 1);
 
@@ -853,13 +855,19 @@ static void usage(u8 *argv0) {
       "  -f file       - input file read by the tested program (stdin)\n"
       "  -t msec       - timeout for each run (%u ms)\n"
       "  -m megs       - memory limit for child process (%u MB)\n"
+#if defined(__linux__) && defined(__aarch64__)
+      "  -A            - use binary-only instrumentation (ARM CoreSight mode)\n"
+#endif
       "  -O            - use binary-only instrumentation (FRIDA mode)\n"
+#if defined(__linux__)
       "  -Q            - use binary-only instrumentation (QEMU mode)\n"
       "  -U            - use unicorn-based instrumentation (Unicorn mode)\n"
       "  -W            - use qemu-based instrumentation with Wine (Wine "
       "mode)\n"
       "                  (Not necessary, here for consistency with other afl-* "
-      "tools)\n\n"
+      "tools)\n"
+#endif
+      "\n"
 
       "Minimization settings:\n"
 
@@ -877,12 +885,13 @@ static void usage(u8 *argv0) {
       "              the target was compiled for\n"
       "AFL_PRELOAD:  LD_PRELOAD / DYLD_INSERT_LIBRARIES settings for target\n"
       "AFL_TMIN_EXACT: require execution paths to match for crashing inputs\n"
+      "AFL_NO_FORKSRV: run target via execve instead of using the forkserver\n"
       "ASAN_OPTIONS: custom settings for ASAN\n"
       "              (must contain abort_on_error=1 and symbolize=0)\n"
       "MSAN_OPTIONS: custom settings for MSAN\n"
       "              (must contain exitcode="STRINGIFY(MSAN_ERROR)" and symbolize=0)\n"
-      "TMPDIR: directory to use for temporary input files\n"
-      , argv0, EXEC_TIMEOUT, MEM_LIMIT, doc_path);
+      "TMPDIR: directory to use for temporary input files\n",
+      argv0, EXEC_TIMEOUT, MEM_LIMIT, doc_path);
 
   exit(1);
 
@@ -909,7 +918,7 @@ int main(int argc, char **argv_orig, char **envp) {
 
   SAYF(cCYA "afl-tmin" VERSION cRST " by Michal Zalewski\n");
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:B:xeOQUWHh")) > 0) {
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:B:xeAOQUWHh")) > 0) {
 
     switch (opt) {
 
@@ -1021,11 +1030,23 @@ int main(int argc, char **argv_orig, char **envp) {
 
         break;
 
+      case 'A':                                           /* CoreSight mode */
+
+#if !defined(__aarch64__) || !defined(__linux__)
+        FATAL("-A option is not supported on this platform");
+#endif
+
+        if (fsrv->cs_mode) { FATAL("Multiple -A options not supported"); }
+
+        fsrv->cs_mode = 1;
+        break;
+
       case 'O':                                               /* FRIDA mode */
 
         if (fsrv->frida_mode) { FATAL("Multiple -O options not supported"); }
 
         fsrv->frida_mode = 1;
+        setenv("AFL_FRIDA_INST_SEED", "1", 1);
 
         break;
 
@@ -1104,6 +1125,12 @@ int main(int argc, char **argv_orig, char **envp) {
   if (optind == argc || !in_file || !output_file) { usage(argv[0]); }
 
   check_environment_vars(envp);
+
+  if (getenv("AFL_NO_FORKSRV")) {             /* if set, use the fauxserver */
+    fsrv->use_fauxsrv = true;
+
+  }
+
   setenv("AFL_NO_AUTODICT", "1", 1);
 
   /* initialize cmplog_mode */
@@ -1117,6 +1144,7 @@ int main(int argc, char **argv_orig, char **envp) {
   fsrv->target_path = find_binary(argv[optind]);
   fsrv->trace_bits = afl_shm_init(&shm, map_size, 0);
   detect_file_args(argv + optind, out_file, &fsrv->use_stdin);
+  signal(SIGALRM, kill_child);
 
   if (fsrv->qemu_mode) {
 
@@ -1131,6 +1159,11 @@ int main(int argc, char **argv_orig, char **envp) {
                                argv + optind);
 
     }
+
+  } else if (fsrv->cs_mode) {
+
+    use_argv =
+        get_cs_argv(argv[0], &fsrv->target_path, argc - optind, argv + optind);
 
   } else {
 
@@ -1201,6 +1234,7 @@ int main(int argc, char **argv_orig, char **envp) {
   fsrv->shmem_fuzz = map + sizeof(u32);
 
   read_initial_file();
+  (void)check_binary_signatures(fsrv->target_path);
 
   if (!fsrv->qemu_mode && !unicorn_mode) {
 

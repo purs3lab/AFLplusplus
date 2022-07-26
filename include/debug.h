@@ -10,13 +10,13 @@
                      Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
  */
 
@@ -192,7 +192,7 @@ static inline const char *colorfilter(const char *x) {
   if (likely(disabled)) return x;
 
   static char monochromestring[4096];
-  char *      d = monochromestring;
+  char       *d = monochromestring;
   int         in_seq = 0;
 
   while (*x) {
@@ -355,15 +355,41 @@ static inline const char *colorfilter(const char *x) {
 /* Error-checking versions of read() and write() that call RPFATAL() as
    appropriate. */
 
-#define ck_write(fd, buf, len, fn)                                        \
-  do {                                                                    \
-                                                                          \
-    int _fd = (fd);                                                       \
-                                                                          \
-    s32 _len = (s32)(len);                                                \
-    s32 _res = write(_fd, (buf), _len);                                   \
-    if (_res != _len) RPFATAL(_res, "Short write to %s, fd %d", fn, _fd); \
-                                                                          \
+#define ck_write(fd, buf, len, fn)                                            \
+  do {                                                                        \
+                                                                              \
+    if (len <= 0) break;                                                      \
+    int _fd = (fd);                                                           \
+    s32 _written = 0, _off = 0, _len = (s32)(len);                            \
+                                                                              \
+    do {                                                                      \
+                                                                              \
+      s32 _res = write(_fd, (buf) + _off, _len);                              \
+      if (_res != _len && (_res > 0 && _written + _res != _len)) {            \
+                                                                              \
+        if (_res > 0) {                                                       \
+                                                                              \
+          _written += _res;                                                   \
+          _len -= _res;                                                       \
+          _off += _res;                                                       \
+                                                                              \
+        } else {                                                              \
+                                                                              \
+          RPFATAL(_res, "Short write to %s, fd %d (%d of %d bytes)", fn, _fd, \
+                  _res, _len);                                                \
+                                                                              \
+        }                                                                     \
+                                                                              \
+      } else {                                                                \
+                                                                              \
+        break;                                                                \
+                                                                              \
+      }                                                                       \
+                                                                              \
+    } while (1);                                                              \
+                                                                              \
+                                                                              \
+                                                                              \
   } while (0)
 
 #define ck_read(fd, buf, len, fn)                              \

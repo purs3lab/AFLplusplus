@@ -10,13 +10,13 @@
                      Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
    Gather some functions common to multiple executables
 
@@ -38,6 +38,7 @@
 
 #define STRINGIFY_VAL_SIZE_MAX (16)
 
+u32  check_binary_signatures(u8 *fn);
 void detect_file_args(char **argv, u8 *prog_in, bool *use_stdin);
 void print_suggested_envs(char *mispelled_env);
 void check_environment_vars(char **env);
@@ -45,9 +46,10 @@ void check_environment_vars(char **env);
 char **argv_cpy_dup(int argc, char **argv);
 void   argv_cpy_free(char **argv);
 
+char **get_cs_argv(u8 *own_loc, u8 **target_path_p, int argc, char **argv);
 char **get_qemu_argv(u8 *own_loc, u8 **target_path_p, int argc, char **argv);
 char **get_wine_argv(u8 *own_loc, u8 **target_path_p, int argc, char **argv);
-char * get_afl_env(char *env);
+char  *get_afl_env(char *env);
 
 /* Extract env vars from input string and set them using setenv()
    For use with AFL_TARGET_ENV, ... */

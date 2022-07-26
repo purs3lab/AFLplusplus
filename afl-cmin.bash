@@ -11,7 +11,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at:
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#   https://www.apache.org/licenses/LICENSE-2.0
 #
 # This tool tries to find the smallest subset of files in the input directory
 # that still trigger the full range of instrumentation data points seen in
@@ -135,6 +135,7 @@ For additional tips, please consult README.md.
 
 Environment variables used:
 AFL_KEEP_TRACES: leave the temporary <out_dir>\.traces directory
+AFL_NO_FORKSRV: run target via execve instead of using the forkserver
 AFL_PATH: last resort location to find the afl-showmap binary
 AFL_SKIP_BIN_CHECK: skip check for target binary
 _EOF_
@@ -309,7 +310,7 @@ if [ "$STDIN_FILE" = "" ]; then
 else
 
   cp "$IN_DIR/$FIRST_FILE" "$STDIN_FILE"
-  AFL_CMIN_ALLOW_ANY=1 "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/.run_test" -Z $EXTRA_PAR -A "$STDIN_FILE" -- "$@" </dev/null
+  AFL_CMIN_ALLOW_ANY=1 "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/.run_test" -Z $EXTRA_PAR -H "$STDIN_FILE" -- "$@" </dev/null
 
 fi
 
@@ -359,7 +360,7 @@ echo "[*] Obtaining traces for input files in '$IN_DIR'..."
 
       cp "$IN_DIR/$fn" "$STDIN_FILE"
 
-      "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/$fn" -Z $EXTRA_PAR -A "$STDIN_FILE" -- "$@" </dev/null
+      "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/$fn" -Z $EXTRA_PAR -H "$STDIN_FILE" -- "$@" </dev/null
 
     done
 

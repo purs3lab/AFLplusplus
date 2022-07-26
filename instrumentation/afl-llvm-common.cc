@@ -96,9 +96,8 @@ bool isIgnoreFunction(const llvm::Function *F) {
 
   static constexpr const char *ignoreSubstringList[] = {
 
-      "__asan",       "__msan",     "__ubsan", "__lsan",
-      "__san",        "__sanitize", "__cxx",   "_GLOBAL__",
-      "DebugCounter", "DwarfDebug", "DebugLoc"
+      "__asan", "__msan",       "__ubsan",    "__lsan",  "__san", "__sanitize",
+      "__cxx",  "DebugCounter", "DwarfDebug", "DebugLoc"
 
   };
 
@@ -282,7 +281,7 @@ void scanForDangerousFunctions(llvm::Module *M) {
 
   if (!M) return;
 
-#if LLVM_VERSION_MAJOR > 3 || \
+#if LLVM_VERSION_MAJOR >= 4 || \
     (LLVM_VERSION_MAJOR == 3 && LLVM_VERSION_MINOR >= 9)
 
   for (GlobalIFunc &IF : M->ifuncs()) {
@@ -292,7 +291,7 @@ void scanForDangerousFunctions(llvm::Module *M) {
     StringRef r_name = cast<Function>(r->getOperand(0))->getName();
     if (!be_quiet)
       fprintf(stderr,
-              "Info: Found an ifunc with name %s that points to resolver "
+              "Note: Found an ifunc with name %s that points to resolver "
               "function %s, we will not instrument this, putting it into the "
               "block list.\n",
               ifunc_name.str().c_str(), r_name.str().c_str());
@@ -330,7 +329,7 @@ void scanForDangerousFunctions(llvm::Module *M) {
 
                 if (!be_quiet)
                   fprintf(stderr,
-                          "Info: Found constructor function %s with prio "
+                          "Note: Found constructor function %s with prio "
                           "%u, we will not instrument this, putting it into a "
                           "block list.\n",
                           F->getName().str().c_str(), Priority);
@@ -402,7 +401,7 @@ static std::string getSourceName(llvm::Function *F) {
 
 }
 
-bool isInInstrumentList(llvm::Function *F) {
+bool isInInstrumentList(llvm::Function *F, std::string Filename) {
 
   bool return_default = true;
 
@@ -449,6 +448,8 @@ bool isInInstrumentList(llvm::Function *F) {
 
       std::string source_file = getSourceName(F);
 
+      if (source_file.empty()) { source_file = Filename; }
+
       if (!source_file.empty()) {
 
         for (std::list<std::string>::iterator it = denyListFiles.begin();
@@ -479,7 +480,7 @@ bool isInInstrumentList(llvm::Function *F) {
         if (!be_quiet)
           WARNF(
               "No debug information found for function %s, will be "
-              "instrumented (recompile with -g -O[1-3]).",
+              "instrumented (recompile with -g -O[1-3] and use a modern llvm).",
               F->getName().str().c_str());
 
       }
@@ -529,6 +530,8 @@ bool isInInstrumentList(llvm::Function *F) {
 
       std::string source_file = getSourceName(F);
 
+      if (source_file.empty()) { source_file = Filename; }
+
       if (!source_file.empty()) {
 
         for (std::list<std::string>::iterator it = allowListFiles.begin();
@@ -564,7 +567,7 @@ bool isInInstrumentList(llvm::Function *F) {
         if (!be_quiet)
           WARNF(
               "No debug information found for function %s, will not be "
-              "instrumented (recompile with -g -O[1-3]).",
+              "instrumented (recompile with -g -O[1-3] and use a modern llvm).",
               F->getName().str().c_str());
         return false;
 

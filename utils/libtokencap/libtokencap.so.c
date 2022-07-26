@@ -6,7 +6,7 @@
    Originally written by Michal Zalewski
 
    Copyright 2016 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -32,6 +32,8 @@
 
 #include "../types.h"
 #include "../config.h"
+
+#include "debug.h"
 
 #if !defined __linux__ && !defined __APPLE__ && !defined __FreeBSD__ &&      \
     !defined __OpenBSD__ && !defined __NetBSD__ && !defined __DragonFly__ && \
@@ -169,7 +171,7 @@ static void __tokencap_load_mappings(void) {
   int mib[] = {CTL_VM, VM_PROC, VM_PROC_MAP, __tokencap_pid,
                sizeof(struct kinfo_vmentry)};
   #endif
-  char * buf, *low, *high;
+  char  *buf, *low, *high;
   size_t miblen = sizeof(mib) / sizeof(mib[0]);
   size_t len;
 
@@ -342,6 +344,8 @@ static void __tokencap_dump(const u8 *ptr, size_t len, u8 is_text) {
   int wrt_ok = (1 == write(__tokencap_out_file, "\"", 1));
   wrt_ok &= (pos == write(__tokencap_out_file, buf, pos));
   wrt_ok &= (2 == write(__tokencap_out_file, "\"\n", 2));
+
+  if (!wrt_ok) { DEBUGF("%s", "writing to the token file failed\n"); }
 
 }
 

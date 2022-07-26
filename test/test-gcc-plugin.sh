@@ -40,7 +40,7 @@ test -e ../afl-gcc-fast -a -e ../afl-compiler-rt.o && {
   }
 
   test -e test-compcov.harden.gccpi && test_compcov_binary_functionality ./test-compcov.harden.gccpi && {
-    grep -Eq$GREPAOPTION 'stack_chk_fail|fstack-protector-all|fortified' test-compcov.harden.gccpi > /dev/null 2>&1 && {
+    nm test-compcov.harden.gccpi | grep -Eq 'stack_chk_fail|fstack-protector-all|fortified' > /dev/null 2>&1 && {
       $ECHO "$GREEN[+] gcc_plugin hardened mode succeeded and is working"
     } || {
       $ECHO "$RED[!] gcc_plugin hardened mode is not hardened"
@@ -52,10 +52,6 @@ test -e ../afl-gcc-fast -a -e ../afl-compiler-rt.o && {
     CODE=1
   }
   # now we want to be sure that afl-fuzz is working
-  (test "$(uname -s)" = "Linux" && test "$(sysctl kernel.core_pattern)" != "kernel.core_pattern = core" && {
-    $ECHO "$YELLOW[-] we should not run afl-fuzz with enabled core dumps. Run 'sudo sh afl-system-config'.$RESET"
-    true
-  }) ||
   # make sure crash reporter is disabled on Mac OS X
   (test "$(uname -s)" = "Darwin" && test $(launchctl list 2>/dev/null | grep -q '\.ReportCrash$') && {
     $ECHO "$RED[!] we cannot run afl-fuzz with enabled crash reporter. Run 'sudo sh afl-system-config'.$RESET"

@@ -10,13 +10,13 @@
                      Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2021 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
  */
 
@@ -26,7 +26,7 @@
 /* Version string: */
 
 // c = release, a = volatile github dev, e = experimental branch
-#define VERSION "++3.13a"
+#define VERSION "++4.02a"
 
 /******************************************************
  *                                                    *
@@ -154,7 +154,7 @@
    cases that show variable behavior): */
 
 #define CAL_CYCLES 8U
-#define CAL_CYCLES_LONG 40U
+#define CAL_CYCLES_LONG 20U
 
 /* Number of subsequent timeouts before abandoning an input file: */
 
@@ -163,7 +163,7 @@
 /* Maximum number of unique hangs or crashes to record: */
 
 #define KEEP_UNIQUE_HANG 500U
-#define KEEP_UNIQUE_CRASH 5000U
+#define KEEP_UNIQUE_CRASH 10000U
 
 /* Baseline number of random tweaks during a single 'havoc' stage: */
 
@@ -237,11 +237,11 @@
    (note that if this value is changed, several areas in afl-cc.c, afl-fuzz.c
    and afl-fuzz-state.c have to be changed as well! */
 
-#define MAX_FILE (1 * 1024 * 1024U)
+#define MAX_FILE (1 * 1024 * 1024L)
 
 /* The same, for the test case minimizer: */
 
-#define TMIN_MAX_FILE (10 * 1024 * 1024)
+#define TMIN_MAX_FILE (10 * 1024 * 1024L)
 
 /* Block normalization steps for afl-tmin: */
 
@@ -267,8 +267,8 @@
    (first value), and to keep in memory as candidates. The latter should be much
    higher than the former. */
 
-#define USE_AUTO_EXTRAS 128
-#define MAX_AUTO_EXTRAS (USE_AUTO_EXTRAS * 64)
+#define USE_AUTO_EXTRAS 4096
+#define MAX_AUTO_EXTRAS (USE_AUTO_EXTRAS * 8)
 
 /* Scaling factor for the effector map used to skip some of the more
    expensive deterministic steps. The actual divisor is set to

@@ -1,5 +1,5 @@
 PWD:=$(shell pwd)/
-ROOT:=$(shell realpath $(PWD)../../..)/
+ROOT:=$(PWD)../../../
 BUILD_DIR:=$(PWD)build/
 
 LIBPNG_BUILD_DIR:=$(BUILD_DIR)libpng/
@@ -22,7 +22,7 @@ PNGTEST_URL:="https://raw.githubusercontent.com/google/fuzzbench/master/benchmar
 
 TEST_BIN:=$(BUILD_DIR)test
 ifeq "$(shell uname)" "Darwin"
-TEST_BIN_LDFLAGS:=-undefined dynamic_lookup
+TEST_BIN_LDFLAGS:=-undefined dynamic_lookup -Wl,-no_pie
 endif
 
 TEST_DATA_DIR:=$(LIBPNG_DIR)contrib/pngsuite/
@@ -35,6 +35,9 @@ FRIDA_OUT:=$(BUILD_DIR)frida-out
 all: $(TEST_BIN)
 	make -C $(ROOT)frida_mode/
 
+32:
+	CFLAGS="-m32" LDFLAGS="-m32" ARCH="x86" make all
+
 $(BUILD_DIR):
 	mkdir -p $@
 
@@ -46,7 +49,7 @@ $(HARNESS_FILE): | $(HARNESS_BUILD_DIR)
 	wget -O $@ $(HARNESS_URL)
 
 $(HARNESS_OBJ): $(HARNESS_FILE)
-	$(CC) -o $@ -c $<
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ -c $<
 
 ######### PNGTEST ########
 
@@ -57,7 +60,7 @@ $(PNGTEST_FILE): | $(PNGTEST_BUILD_DIR)
 	wget -O $@ $(PNGTEST_URL)
 
 $(PNGTEST_OBJ): $(PNGTEST_FILE) | $(LIBPNG_DIR)
-	$(CXX) -std=c++11 -I $(LIBPNG_DIR) -o $@ -c $<
+	$(CXX) $(CFLAGS) $(LDFLAGS) -std=c++11 -I $(LIBPNG_DIR) -o $@ -c $<
 
 ######### LIBPNG ########
 
@@ -80,6 +83,8 @@ $(LIBPNG_LIB): $(LIBPNG_MAKEFILE)
 
 $(TEST_BIN): $(HARNESS_OBJ) $(PNGTEST_OBJ) $(LIBPNG_LIB)
 	$(CXX) \
+		$(CFLAGS) \
+		$(LDFLAGS) \
 		-o $@ \
 		$(HARNESS_OBJ) $(PNGTEST_OBJ) $(LIBPNG_LIB) \
 		-lz \
@@ -107,3 +112,9 @@ frida: $(TEST_BIN)
 		-o $(FRIDA_OUT) \
 		-- \
 			$(TEST_BIN) @@
+
+debug:
+	gdb \
+		--ex 'set environment LD_PRELOAD=$(ROOT)afl-frida-trace.so' \
+		--ex 'set disassembly-flavor intel' \
+		--args $(TEST_BIN) $(TEST_DATA_DIR)basn0g01.png

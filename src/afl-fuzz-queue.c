@@ -9,12 +9,12 @@
                         Andrea Fioraldi <andreafioraldi@gmail.com>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
    This is the real deal: the program takes an instrumented binary and
    attempts a variety of basic fuzzing tricks, paying close attention to
@@ -31,7 +31,7 @@
 
 inline u32 select_next_queue_entry(afl_state_t *afl) {
 
-  u32    s = rand_below(afl, afl->queued_paths);
+  u32    s = rand_below(afl, afl->queued_items);
   double p = rand_next_percent(afl);
   /*
   fprintf(stderr, "select: p=%f s=%u ... p < prob[s]=%f ? s=%u : alias[%u]=%u"
@@ -58,7 +58,8 @@ double compute_weight(afl_state_t *afl, struct queue_entry *q,
   if (likely(afl->schedule < RARE)) { weight *= (avg_exec_us / q->exec_us); }
   weight *= (log(q->bitmap_size) / avg_bitmap_size);
   weight *= (1 + (q->tc_ref / avg_top_size));
-  if (unlikely(q->favored)) weight *= 5;
+  if (unlikely(q->favored)) { weight *= 5; }
+  if (unlikely(!q->was_fuzzed)) { weight *= 2; }
 
   return weight;
 
@@ -68,7 +69,7 @@ double compute_weight(afl_state_t *afl, struct queue_entry *q,
 
 void create_alias_table(afl_state_t *afl) {
 
-  u32    n = afl->queued_paths, i = 0, a, g;
+  u32    n = afl->queued_items, i = 0, a, g;
   double sum = 0;
 
   afl->alias_table =
@@ -76,8 +77,8 @@ void create_alias_table(afl_state_t *afl) {
   afl->alias_probability = (double *)afl_realloc(
       (void **)&afl->alias_probability, n * sizeof(double));
   double *P = (double *)afl_realloc(AFL_BUF_PARAM(out), n * sizeof(double));
-  int *   S = (u32 *)afl_realloc(AFL_BUF_PARAM(out_scratch), n * sizeof(u32));
-  int *   L = (u32 *)afl_realloc(AFL_BUF_PARAM(in_scratch), n * sizeof(u32));
+  int    *S = (u32 *)afl_realloc(AFL_BUF_PARAM(out_scratch), n * sizeof(u32));
+  int    *L = (u32 *)afl_realloc(AFL_BUF_PARAM(in_scratch), n * sizeof(u32));
 
   if (!P || !S || !L || !afl->alias_table || !afl->alias_probability) {
 
@@ -198,6 +199,8 @@ void create_alias_table(afl_state_t *afl) {
   while (nS)
     afl->alias_probability[S[--nS]] = 1;
 
+  afl->reinit_table = 0;
+
   /*
   #ifdef INTROSPECTION
     u8 fn[PATH_MAX];
@@ -312,13 +315,102 @@ void mark_as_redundant(afl_state_t *afl, struct queue_entry *q, u8 state) {
 
 }
 
-/* check if ascii or UTF-8 */
+/* check if pointer is ascii or UTF-8 */
+
+u8 check_if_text_buf(u8 *buf, u32 len) {
+
+  u32 offset = 0, ascii = 0, utf8 = 0;
+
+  while (offset < len) {
+
+    // ASCII: <= 0x7F to allow ASCII control characters
+    if ((buf[offset + 0] == 0x09 || buf[offset + 0] == 0x0A ||
+         buf[offset + 0] == 0x0D ||
+         (0x20 <= buf[offset + 0] && buf[offset + 0] <= 0x7E))) {
+
+      offset++;
+      utf8++;
+      ascii++;
+      continue;
+
+    }
+
+    if (isascii((int)buf[offset]) || isprint((int)buf[offset])) {
+
+      ascii++;
+      // we continue though as it can also be a valid utf8
+
+    }
+
+    // non-overlong 2-byte
+    if (len - offset > 1 &&
+        ((0xC2 <= buf[offset + 0] && buf[offset + 0] <= 0xDF) &&
+         (0x80 <= buf[offset + 1] && buf[offset + 1] <= 0xBF))) {
+
+      offset += 2;
+      utf8++;
+      continue;
+
+    }
+
+    // excluding overlongs
+    if ((len - offset > 2) &&
+        ((buf[offset + 0] == 0xE0 &&
+          (0xA0 <= buf[offset + 1] && buf[offset + 1] <= 0xBF) &&
+          (0x80 <= buf[offset + 2] &&
+           buf[offset + 2] <= 0xBF)) ||  // straight 3-byte
+         (((0xE1 <= buf[offset + 0] && buf[offset + 0] <= 0xEC) ||
+           buf[offset + 0] == 0xEE || buf[offset + 0] == 0xEF) &&
+          (0x80 <= buf[offset + 1] && buf[offset + 1] <= 0xBF) &&
+          (0x80 <= buf[offset + 2] &&
+           buf[offset + 2] <= 0xBF)) ||  // excluding surrogates
+         (buf[offset + 0] == 0xED &&
+          (0x80 <= buf[offset + 1] && buf[offset + 1] <= 0x9F) &&
+          (0x80 <= buf[offset + 2] && buf[offset + 2] <= 0xBF)))) {
+
+      offset += 3;
+      utf8++;
+      continue;
+
+    }
+
+    // planes 1-3
+    if ((len - offset > 3) &&
+        ((buf[offset + 0] == 0xF0 &&
+          (0x90 <= buf[offset + 1] && buf[offset + 1] <= 0xBF) &&
+          (0x80 <= buf[offset + 2] && buf[offset + 2] <= 0xBF) &&
+          (0x80 <= buf[offset + 3] &&
+           buf[offset + 3] <= 0xBF)) ||  // planes 4-15
+         ((0xF1 <= buf[offset + 0] && buf[offset + 0] <= 0xF3) &&
+          (0x80 <= buf[offset + 1] && buf[offset + 1] <= 0xBF) &&
+          (0x80 <= buf[offset + 2] && buf[offset + 2] <= 0xBF) &&
+          (0x80 <= buf[offset + 3] && buf[offset + 3] <= 0xBF)) ||  // plane 16
+         (buf[offset + 0] == 0xF4 &&
+          (0x80 <= buf[offset + 1] && buf[offset + 1] <= 0x8F) &&
+          (0x80 <= buf[offset + 2] && buf[offset + 2] <= 0xBF) &&
+          (0x80 <= buf[offset + 3] && buf[offset + 3] <= 0xBF)))) {
+
+      offset += 4;
+      utf8++;
+      continue;
+
+    }
+
+    offset++;
+
+  }
+
+  return (utf8 > ascii ? utf8 : ascii);
+
+}
+
+/* check if queue entry is ascii or UTF-8 */
 
 static u8 check_if_text(afl_state_t *afl, struct queue_entry *q) {
 
   if (q->len < AFL_TXT_MIN_LEN) return 0;
 
-  u8 *    buf;
+  u8     *buf;
   int     fd;
   u32     len = q->len, offset = 0, ascii = 0, utf8 = 0;
   ssize_t comp;
@@ -455,40 +547,28 @@ void add_to_queue(afl_state_t *afl, u8 *fname, u32 len, u8 passed_det) {
 
   if (likely(q->len > 4)) afl->ready_for_splicing_count++;
 
-  ++afl->queued_paths;
-  ++afl->active_paths;
+  ++afl->queued_items;
+  ++afl->active_items;
   ++afl->pending_not_fuzzed;
 
   afl->cycles_wo_finds = 0;
 
   struct queue_entry **queue_buf = afl_realloc(
-      AFL_BUF_PARAM(queue), afl->queued_paths * sizeof(struct queue_entry *));
+      AFL_BUF_PARAM(queue), afl->queued_items * sizeof(struct queue_entry *));
   if (unlikely(!queue_buf)) { PFATAL("alloc"); }
-  queue_buf[afl->queued_paths - 1] = q;
-  q->id = afl->queued_paths - 1;
+  queue_buf[afl->queued_items - 1] = q;
+  q->id = afl->queued_items - 1;
 
-  afl->last_path_time = get_cur_time();
+  afl->last_find_time = get_cur_time();
 
   if (afl->custom_mutators_count) {
 
-    LIST_FOREACH(&afl->custom_mutator_list, struct custom_mutator, {
+    /* At the initialization stage, queue_cur is NULL */
+    if (afl->queue_cur && !afl->syncing_party) {
 
-      if (el->afl_custom_queue_new_entry) {
+      run_afl_custom_queue_new_entry(afl, q, fname, afl->queue_cur->fname);
 
-        u8 *fname_orig = NULL;
-
-        /* At the initialization stage, queue_cur is NULL */
-        if (afl->queue_cur && !afl->syncing_party) {
-
-          fname_orig = afl->queue_cur->fname;
-
-        }
-
-        el->afl_custom_queue_new_entry(el->data, fname, fname_orig);
-
-      }
-
-    });
+    }
 
   }
 
@@ -503,7 +583,7 @@ void destroy_queue(afl_state_t *afl) {
 
   u32 i;
 
-  for (i = 0; i < afl->queued_paths; i++) {
+  for (i = 0; i < afl->queued_items; i++) {
 
     struct queue_entry *q;
 
@@ -657,7 +737,7 @@ void cull_queue(afl_state_t *afl) {
   afl->queued_favored = 0;
   afl->pending_favored = 0;
 
-  for (i = 0; i < afl->queued_paths; i++) {
+  for (i = 0; i < afl->queued_items; i++) {
 
     afl->queue_buf[i]->favored = 0;
 
@@ -689,12 +769,7 @@ void cull_queue(afl_state_t *afl) {
         afl->top_rated[i]->favored = 1;
         ++afl->queued_favored;
 
-        if (afl->top_rated[i]->fuzz_level == 0 ||
-            !afl->top_rated[i]->was_fuzzed) {
-
-          ++afl->pending_favored;
-
-        }
+        if (!afl->top_rated[i]->was_fuzzed) { ++afl->pending_favored; }
 
       }
 
@@ -702,7 +777,7 @@ void cull_queue(afl_state_t *afl) {
 
   }
 
-  for (i = 0; i < afl->queued_paths; i++) {
+  for (i = 0; i < afl->queued_items; i++) {
 
     if (likely(!afl->queue_buf[i]->disabled)) {
 
@@ -835,7 +910,7 @@ u32 calculate_score(afl_state_t *afl, struct queue_entry *q) {
 
   }
 
-  u32         n_paths;
+  u32         n_items;
   double      factor = 1.0;
   long double fuzz_mu;
 
@@ -853,26 +928,26 @@ u32 calculate_score(afl_state_t *afl, struct queue_entry *q) {
 
     case COE:
       fuzz_mu = 0.0;
-      n_paths = 0;
+      n_items = 0;
 
       // Don't modify perf_score for unfuzzed seeds
-      if (q->fuzz_level == 0) break;
+      if (!q->fuzz_level) break;
 
       u32 i;
-      for (i = 0; i < afl->queued_paths; i++) {
+      for (i = 0; i < afl->queued_items; i++) {
 
         if (likely(!afl->queue_buf[i]->disabled)) {
 
           fuzz_mu += log2(afl->n_fuzz[afl->queue_buf[i]->n_fuzz_entry]);
-          n_paths++;
+          n_items++;
 
         }
 
       }
 
-      if (unlikely(!n_paths)) { FATAL("Queue state corrupt"); }
+      if (unlikely(!n_items)) { FATAL("Queue state corrupt"); }
 
-      fuzz_mu = fuzz_mu / n_paths;
+      fuzz_mu = fuzz_mu / n_items;
 
       if (log2(afl->n_fuzz[q->n_fuzz_entry]) > fuzz_mu) {
 
@@ -887,7 +962,7 @@ u32 calculate_score(afl_state_t *afl, struct queue_entry *q) {
     case FAST:
 
       // Don't modify unfuzzed seeds
-      if (q->fuzz_level == 0) break;
+      if (!q->fuzz_level) break;
 
       switch ((u32)log2(afl->n_fuzz[q->n_fuzz_entry])) {
 
@@ -938,7 +1013,7 @@ u32 calculate_score(afl_state_t *afl, struct queue_entry *q) {
          -- rare. the simpler algo however is good when rare is not.
         // the newer the entry, the higher the pref_score
         perf_score *= (1 + (double)((double)q->depth /
-        (double)afl->queued_paths));
+        (double)afl->queued_items));
         // with special focus on the last 8 entries
         if (afl->max_depth - q->depth < 8) perf_score *= (1 + ((8 -
         (afl->max_depth - q->depth)) / 5));
@@ -1132,11 +1207,9 @@ inline u8 *queue_testcase_get(afl_state_t *afl, struct queue_entry *q) {
 
         do_once = 1;
         // release unneeded memory
-        u8 *ptr = ck_realloc(
+        afl->q_testcase_cache = ck_realloc(
             afl->q_testcase_cache,
             (afl->q_testcase_max_cache_entries + 1) * sizeof(size_t));
-
-        if (ptr) { afl->q_testcase_cache = (struct queue_entry **)ptr; }
 
       }
 

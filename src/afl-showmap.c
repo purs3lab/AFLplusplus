@@ -12,13 +12,13 @@
                         Dominik Maier <mail@dmnk.co>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2022 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
    You may obtain a copy of the License at:
 
-     http://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
    A very simple tool that runs the targeted binary and displays
    the contents of the trace bitmap in a human-readable form. Useful in
@@ -52,6 +52,7 @@
 #include <fcntl.h>
 #include <limits.h>
 
+#include <dirent.h>
 #include <sys/wait.h>
 #include <sys/time.h>
 #ifndef USEMMAP
@@ -66,6 +67,8 @@ static char *stdin_file;               /* stdin file                        */
 static u8 *in_dir = NULL,              /* input folder                      */
     *out_file = NULL, *at_file = NULL;        /* Substitution string for @@ */
 
+static u8 outfile[PATH_MAX];
+
 static u8 *in_data,                    /* Input data                        */
     *coverage_map;                     /* Coverage map                      */
 
@@ -74,48 +77,36 @@ static u32 tcnt, highest;              /* tuple content information         */
 
 static u32 in_len;                     /* Input data length                 */
 
-static u32 map_size = MAP_SIZE;
+static u32 map_size = MAP_SIZE, timed_out = 0;
 
-static u8 quiet_mode,                  /* Hide non-essential messages?      */
+static bool quiet_mode,                /* Hide non-essential messages?      */
     edges_only,                        /* Ignore hit counts?                */
     raw_instr_output,                  /* Do not apply AFL filters          */
     cmin_mode,                         /* Generate output in afl-cmin mode? */
     binary_mode,                       /* Write output as a binary map      */
     keep_cores,                        /* Allow coredumps?                  */
-    remove_shm = 1,                    /* remove shmem?                     */
+    remove_shm = true,                 /* remove shmem?                     */
     collect_coverage,                  /* collect coverage                  */
     have_coverage,                     /* have coverage?                    */
     no_classify,                       /* do not classify counts            */
-    debug;                             /* debug mode                        */
+    debug,                             /* debug mode                        */
+    print_filenames,                   /* print the current filename        */
+    wait_for_gdb;
 
 static volatile u8 stop_soon,          /* Ctrl-C pressed?                   */
     child_crashed;                     /* Child crashed?                    */
 
 static sharedmem_t       shm;
 static afl_forkserver_t *fsrv;
-static sharedmem_t *     shm_fuzz;
+static sharedmem_t      *shm_fuzz;
 
 /* Classify tuple counts. Instead of mapping to individual bits, as in
    afl-fuzz.c, we map to more user-friendly numbers between 1 and 8. */
 
-#define TIMES4(x) x, x, x, x
-#define TIMES8(x) TIMES4(x), TIMES4(x)
-#define TIMES16(x) TIMES8(x), TIMES8(x)
-#define TIMES32(x) TIMES16(x), TIMES16(x)
-#define TIMES64(x) TIMES32(x), TIMES32(x)
-#define TIMES96(x) TIMES64(x), TIMES32(x)
-#define TIMES128(x) TIMES64(x), TIMES64(x)
 static const u8 count_class_human[256] = {
 
-    [0] = 0,
-    [1] = 1,
-    [2] = 2,
-    [3] = 3,
-    [4] = TIMES4(4),
-    [8] = TIMES8(5),
-    [16] = TIMES16(6),
-    [32] = TIMES96(7),
-    [128] = TIMES128(8)
+    [0] = 0, [1] = 1,  [2] = 2,  [3] = 3,  [4] = 4,
+    [8] = 5, [16] = 6, [32] = 7, [128] = 8
 
 };
 
@@ -125,25 +116,29 @@ static const u8 count_class_binary[256] = {
     [1] = 1,
     [2] = 2,
     [3] = 4,
-    [4] = TIMES4(8),
-    [8] = TIMES8(16),
-    [16] = TIMES16(32),
-    [32] = TIMES32(64),
-    [128] = TIMES64(128)
+    [4 ... 7] = 8,
+    [8 ... 15] = 16,
+    [16 ... 31] = 32,
+    [32 ... 127] = 64,
+    [128 ... 255] = 128
 
 };
 
-#undef TIMES128
-#undef TIMES96
-#undef TIMES64
-#undef TIMES32
-#undef TIMES16
-#undef TIMES8
-#undef TIMES4
+static void kill_child() {
+
+  timed_out = 1;
+  if (fsrv->child_pid > 0) {
+
+    kill(fsrv->child_pid, fsrv->kill_signal);
+    fsrv->child_pid = -1;
+
+  }
+
+}
 
 static void classify_counts(afl_forkserver_t *fsrv) {
 
-  u8 *      mem = fsrv->trace_bits;
+  u8       *mem = fsrv->trace_bits;
   const u8 *map = binary_mode ? count_class_binary : count_class_human;
 
   u32 i = map_size;
@@ -171,7 +166,7 @@ static void classify_counts(afl_forkserver_t *fsrv) {
 }
 
 static sharedmem_t *deinit_shmem(afl_forkserver_t *fsrv,
-                                 sharedmem_t *     shm_fuzz) {
+                                 sharedmem_t      *shm_fuzz) {
 
   afl_shm_deinit(shm_fuzz);
   fsrv->support_shmem_fuzz = 0;
@@ -228,10 +223,22 @@ static u32 write_results_to_file(afl_forkserver_t *fsrv, u8 *outfile) {
   u8 cco = !!getenv("AFL_CMIN_CRASHES_ONLY"),
      caa = !!getenv("AFL_CMIN_ALLOW_ANY");
 
-  if (!outfile) { FATAL("Output filename not set (Bug in AFL++?)"); }
+  if (!outfile || !*outfile) {
+
+    FATAL("Output filename not set (Bug in AFL++?)");
+
+  }
 
   if (cmin_mode &&
       (fsrv->last_run_timed_out || (!caa && child_crashed != cco))) {
+
+    if (strcmp(outfile, "-")) {
+
+      // create empty file to prevent error messages in afl-cmin
+      fd = open(outfile, O_WRONLY | O_CREAT | O_EXCL, DEFAULT_PERMISSION);
+      close(fd);
+
+    }
 
     return ret;
 
@@ -320,11 +327,11 @@ static void showmap_run_target_forkserver(afl_forkserver_t *fsrv, u8 *mem,
   if (fsrv->trace_bits[0] == 1) {
 
     fsrv->trace_bits[0] = 0;
-    have_coverage = 1;
+    have_coverage = true;
 
   } else {
 
-    have_coverage = 0;
+    have_coverage = false;
 
   }
 
@@ -335,19 +342,20 @@ static void showmap_run_target_forkserver(afl_forkserver_t *fsrv, u8 *mem,
   if (!fsrv->last_run_timed_out && !stop_soon &&
       WIFSIGNALED(fsrv->child_status)) {
 
-    child_crashed = 1;
+    child_crashed = true;
 
   } else {
 
-    child_crashed = 0;
+    child_crashed = false;
 
   }
 
   if (!quiet_mode) {
 
-    if (fsrv->last_run_timed_out) {
+    if (timed_out || fsrv->last_run_timed_out) {
 
       SAYF(cLRD "\n+++ Program timed off +++\n" cRST);
+      timed_out = 0;
 
     } else if (stop_soon) {
 
@@ -375,6 +383,13 @@ static void showmap_run_target_forkserver(afl_forkserver_t *fsrv, u8 *mem,
 
 static u32 read_file(u8 *in_file) {
 
+  if (print_filenames) {
+
+    SAYF("Processing %s\n", in_file);
+    fflush(stdout);
+
+  }
+
   struct stat st;
   s32         fd = open(in_file, O_RDONLY);
 
@@ -382,11 +397,31 @@ static u32 read_file(u8 *in_file) {
 
   if (fstat(fd, &st) || !st.st_size) {
 
-    WARNF("Zero-sized input file '%s'.", in_file);
+    if (!be_quiet && !quiet_mode) {
+
+      WARNF("Zero-sized input file '%s'.", in_file);
+
+    }
 
   }
 
-  in_len = st.st_size;
+  if (st.st_size > MAX_FILE) {
+
+    if (!be_quiet && !quiet_mode) {
+
+      WARNF("Input file '%s' is too large, only reading %ld bytes.", in_file,
+            MAX_FILE);
+
+    }
+
+    in_len = MAX_FILE;
+
+  } else {
+
+    in_len = st.st_size;
+
+  }
+
   in_data = ck_alloc_nozero(in_len);
 
   ck_read(fd, in_data, in_len, in_file);
@@ -482,6 +517,8 @@ static void showmap_run_target(afl_forkserver_t *fsrv, char **argv) {
 
   }
 
+  signal(SIGALRM, kill_child);
+
   setitimer(ITIMER_REAL, &it, NULL);
 
   if (waitpid(fsrv->child_pid, &status, 0) <= 0) { FATAL("waitpid() failed"); }
@@ -504,11 +541,11 @@ static void showmap_run_target(afl_forkserver_t *fsrv, char **argv) {
   if (fsrv->trace_bits[0] == 1) {
 
     fsrv->trace_bits[0] = 0;
-    have_coverage = 1;
+    have_coverage = true;
 
   } else {
 
-    have_coverage = 0;
+    have_coverage = false;
 
   }
 
@@ -518,15 +555,16 @@ static void showmap_run_target(afl_forkserver_t *fsrv, char **argv) {
 
   if (!fsrv->last_run_timed_out && !stop_soon && WIFSIGNALED(status)) {
 
-    child_crashed = 1;
+    child_crashed = true;
 
   }
 
   if (!quiet_mode) {
 
-    if (fsrv->last_run_timed_out) {
+    if (timed_out || fsrv->last_run_timed_out) {
 
       SAYF(cLRD "\n+++ Program timed off +++\n" cRST);
+      timed_out = 0;
 
     } else if (stop_soon) {
 
@@ -548,7 +586,7 @@ static void showmap_run_target(afl_forkserver_t *fsrv, char **argv) {
 static void handle_stop_sig(int sig) {
 
   (void)sig;
-  stop_soon = 1;
+  stop_soon = true;
   afl_fsrv_killall();
 
 }
@@ -630,6 +668,8 @@ static void set_up_environment(afl_forkserver_t *fsrv, char **argv) {
 
     } else {
 
+      /* CoreSight mode uses the default behavior. */
+
       setenv("LD_PRELOAD", getenv("AFL_PRELOAD"), 1);
       setenv("DYLD_INSERT_LIBRARIES", getenv("AFL_PRELOAD"), 1);
 
@@ -669,6 +709,98 @@ static void setup_signal_handlers(void) {
 
 }
 
+u32 execute_testcases(u8 *dir) {
+
+  struct dirent **nl;
+  s32             nl_cnt, subdirs = 1;
+  u32             i, done = 0;
+  u8              val_buf[2][STRINGIFY_VAL_SIZE_MAX];
+
+  if (!be_quiet) { ACTF("Scanning '%s'...", dir); }
+
+  /* We use scandir() + alphasort() rather than readdir() because otherwise,
+     the ordering of test cases would vary somewhat randomly and would be
+     difficult to control. */
+
+  nl_cnt = scandir(dir, &nl, NULL, alphasort);
+
+  if (nl_cnt < 0) { return 0; }
+
+  for (i = 0; i < (u32)nl_cnt; ++i) {
+
+    struct stat st;
+
+    u8 *fn2 = alloc_printf("%s/%s", dir, nl[i]->d_name);
+
+    if (lstat(fn2, &st) || access(fn2, R_OK)) {
+
+      PFATAL("Unable to access '%s'", fn2);
+
+    }
+
+    /* obviously we want to skip "descending" into . and .. directories,
+       however it is a good idea to skip also directories that start with
+       a dot */
+    if (subdirs && S_ISDIR(st.st_mode) && nl[i]->d_name[0] != '.') {
+
+      free(nl[i]);                                           /* not tracked */
+      done += execute_testcases(fn2);
+      ck_free(fn2);
+      continue;
+
+    }
+
+    if (!S_ISREG(st.st_mode) || !st.st_size) {
+
+      free(nl[i]);
+      ck_free(fn2);
+      continue;
+
+    }
+
+    if (st.st_size > MAX_FILE && !be_quiet && !quiet_mode) {
+
+      WARNF("Test case '%s' is too big (%s, limit is %s), partial reading", fn2,
+            stringify_mem_size(val_buf[0], sizeof(val_buf[0]), st.st_size),
+            stringify_mem_size(val_buf[1], sizeof(val_buf[1]), MAX_FILE));
+
+    }
+
+    if (!collect_coverage)
+      snprintf(outfile, sizeof(outfile), "%s/%s", out_file, nl[i]->d_name);
+
+    free(nl[i]);
+
+    if (read_file(fn2)) {
+
+      if (wait_for_gdb) {
+
+        fprintf(stderr, "exec: gdb -p %d\n", fsrv->child_pid);
+        fprintf(stderr, "exec: kill -CONT %d\n", getpid());
+        kill(0, SIGSTOP);
+
+      }
+
+      showmap_run_target_forkserver(fsrv, in_data, in_len);
+      ck_free(in_data);
+      ++done;
+
+      if (child_crashed && debug) { WARNF("crashed: %s", fn2); }
+
+      if (collect_coverage)
+        analyze_results(fsrv);
+      else
+        tcnt = write_results_to_file(fsrv, outfile);
+
+    }
+
+  }
+
+  free(nl);                                                  /* not tracked */
+  return done;
+
+}
+
 /* Show banner. */
 
 static void show_banner(void) {
@@ -687,31 +819,37 @@ static void usage(u8 *argv0) {
       "\n%s [ options ] -- /path/to/target_app [ ... ]\n\n"
 
       "Required parameters:\n"
-      "  -o file       - file to write the trace data to\n\n"
+      "  -o file    - file to write the trace data to\n\n"
 
       "Execution control settings:\n"
-      "  -t msec       - timeout for each run (none)\n"
-      "  -m megs       - memory limit for child process (%u MB)\n"
-      "  -O            - use binary-only instrumentation (FRIDA mode)\n"
-      "  -Q            - use binary-only instrumentation (QEMU mode)\n"
-      "  -U            - use Unicorn-based instrumentation (Unicorn mode)\n"
-      "  -W            - use qemu-based instrumentation with Wine (Wine mode)\n"
-      "                  (Not necessary, here for consistency with other afl-* "
-      "tools)\n\n"
+      "  -t msec    - timeout for each run (none)\n"
+      "  -m megs    - memory limit for child process (%u MB)\n"
+#if defined(__linux__) && defined(__aarch64__)
+      "  -A         - use binary-only instrumentation (ARM CoreSight mode)\n"
+#endif
+      "  -O         - use binary-only instrumentation (FRIDA mode)\n"
+#if defined(__linux__)
+      "  -Q         - use binary-only instrumentation (QEMU mode)\n"
+      "  -U         - use Unicorn-based instrumentation (Unicorn mode)\n"
+      "  -W         - use qemu-based instrumentation with Wine (Wine mode)\n"
+      "               (Not necessary, here for consistency with other afl-* "
+      "tools)\n"
+#endif
+      "\n"
       "Other settings:\n"
-      "  -i dir        - process all files in this directory, must be combined "
+      "  -i dir     - process all files below this directory, must be combined "
       "with -o.\n"
-      "                  With -C, -o is a file, without -C it must be a "
+      "               With -C, -o is a file, without -C it must be a "
       "directory\n"
-      "                  and each bitmap will be written there individually.\n"
-      "  -C            - collect coverage, writes all edges to -o and gives a "
+      "               and each bitmap will be written there individually.\n"
+      "  -C         - collect coverage, writes all edges to -o and gives a "
       "summary\n"
-      "                  Must be combined with -i.\n"
-      "  -q            - sink program's output and don't show messages\n"
-      "  -e            - show edge coverage only, ignore hit counts\n"
-      "  -r            - show real tuple values instead of AFL filter values\n"
-      "  -s            - do not classify the map\n"
-      "  -c            - allow core dumps\n\n"
+      "               Must be combined with -i.\n"
+      "  -q         - sink program's output and don't show messages\n"
+      "  -e         - show edge coverage only, ignore hit counts\n"
+      "  -r         - show real tuple values instead of AFL filter values\n"
+      "  -s         - do not classify the map\n"
+      "  -c         - allow core dumps\n\n"
 
       "This tool displays raw tuple data captured by AFL instrumentation.\n"
       "For additional help, consult %s/README.md.\n\n"
@@ -731,7 +869,10 @@ static void usage(u8 *argv0) {
       "AFL_MAP_SIZE: the shared memory size for that target. must be >= the "
       "size the target was compiled for\n"
       "AFL_PRELOAD: LD_PRELOAD / DYLD_INSERT_LIBRARIES settings for target\n"
-      "AFL_QUIET: do not print extra informational output\n",
+      "AFL_PRINT_FILENAMES: If set, the filename currently processed will be "
+      "printed to stdout\n"
+      "AFL_QUIET: do not print extra informational output\n"
+      "AFL_NO_FORKSRV: run target via execve instead of using the forkserver\n",
       argv0, MEM_LIMIT, doc_path);
 
   exit(1);
@@ -744,14 +885,17 @@ int main(int argc, char **argv_orig, char **envp) {
 
   // TODO: u64 mem_limit = MEM_LIMIT;                  /* Memory limit (MB) */
 
-  s32    opt, i;
-  u8     mem_limit_given = 0, timeout_given = 0, unicorn_mode = 0, use_wine = 0;
+  s32  opt, i;
+  bool mem_limit_given = false, timeout_given = false, unicorn_mode = false,
+       use_wine = false;
   char **use_argv;
 
   char **argv = argv_cpy_dup(argc, argv_orig);
 
   afl_forkserver_t fsrv_var = {0};
-  if (getenv("AFL_DEBUG")) { debug = 1; }
+  if (getenv("AFL_DEBUG")) { debug = true; }
+  if (get_afl_env("AFL_PRINT_FILENAMES")) { print_filenames = true; }
+
   fsrv = &fsrv_var;
   afl_fsrv_init(fsrv);
   map_size = get_map_size();
@@ -759,19 +903,19 @@ int main(int argc, char **argv_orig, char **envp) {
 
   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
 
-  if (getenv("AFL_QUIET") != NULL) { be_quiet = 1; }
+  if (getenv("AFL_QUIET") != NULL) { be_quiet = true; }
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:A:eqCZOQUWbcrsh")) > 0) {
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:AeqCZOH:QUWbcrsh")) > 0) {
 
     switch (opt) {
 
       case 's':
-        no_classify = 1;
+        no_classify = true;
         break;
 
       case 'C':
-        collect_coverage = 1;
-        quiet_mode = 1;
+        collect_coverage = true;
+        quiet_mode = true;
         break;
 
       case 'i':
@@ -790,7 +934,7 @@ int main(int argc, char **argv_orig, char **envp) {
         u8 suffix = 'M';
 
         if (mem_limit_given) { FATAL("Multiple -m options not supported"); }
-        mem_limit_given = 1;
+        mem_limit_given = true;
 
         if (!optarg) { FATAL("Wrong usage of -m"); }
 
@@ -851,7 +995,7 @@ int main(int argc, char **argv_orig, char **envp) {
       case 't':
 
         if (timeout_given) { FATAL("Multiple -t options not supported"); }
-        timeout_given = 1;
+        timeout_given = true;
 
         if (!optarg) { FATAL("Wrong usage of -t"); }
 
@@ -873,12 +1017,12 @@ int main(int argc, char **argv_orig, char **envp) {
 
         if (edges_only) { FATAL("Multiple -e options not supported"); }
         if (raw_instr_output) { FATAL("-e and -r are mutually exclusive"); }
-        edges_only = 1;
+        edges_only = true;
         break;
 
       case 'q':
 
-        quiet_mode = 1;
+        quiet_mode = true;
         break;
 
       case 'Z':
@@ -886,11 +1030,11 @@ int main(int argc, char **argv_orig, char **envp) {
         /* This is an undocumented option to write data in the syntax expected
            by afl-cmin. Nobody else should have any use for this. */
 
-        cmin_mode = 1;
-        quiet_mode = 1;
+        cmin_mode = true;
+        quiet_mode = true;
         break;
 
-      case 'A':
+      case 'H':
         /* Another afl-cmin specific feature. */
         at_file = optarg;
         break;
@@ -899,29 +1043,43 @@ int main(int argc, char **argv_orig, char **envp) {
 
         if (fsrv->frida_mode) { FATAL("Multiple -O options not supported"); }
 
-        fsrv->frida_mode = 1;
+        fsrv->frida_mode = true;
+        setenv("AFL_FRIDA_INST_SEED", "1", 1);
 
+        break;
+
+      /* FIXME: We want to use -P for consistency, but it is already unsed for
+       * undocumenetd feature "Another afl-cmin specific feature." */
+      case 'A':                                           /* CoreSight mode */
+
+#if !defined(__aarch64__) || !defined(__linux__)
+        FATAL("-A option is not supported on this platform");
+#endif
+
+        if (fsrv->cs_mode) { FATAL("Multiple -A options not supported"); }
+
+        fsrv->cs_mode = true;
         break;
 
       case 'Q':
 
         if (fsrv->qemu_mode) { FATAL("Multiple -Q options not supported"); }
 
-        fsrv->qemu_mode = 1;
+        fsrv->qemu_mode = true;
         break;
 
       case 'U':
 
         if (unicorn_mode) { FATAL("Multiple -U options not supported"); }
 
-        unicorn_mode = 1;
+        unicorn_mode = true;
         break;
 
       case 'W':                                           /* Wine+QEMU mode */
 
         if (use_wine) { FATAL("Multiple -W options not supported"); }
-        fsrv->qemu_mode = 1;
-        use_wine = 1;
+        fsrv->qemu_mode = true;
+        use_wine = true;
 
         break;
 
@@ -930,20 +1088,20 @@ int main(int argc, char **argv_orig, char **envp) {
         /* Secret undocumented mode. Writes output in raw binary format
            similar to that dumped by afl-fuzz in <out_dir/queue/fuzz_bitmap. */
 
-        binary_mode = 1;
+        binary_mode = true;
         break;
 
       case 'c':
 
         if (keep_cores) { FATAL("Multiple -c options not supported"); }
-        keep_cores = 1;
+        keep_cores = true;
         break;
 
       case 'r':
 
         if (raw_instr_output) { FATAL("Multiple -r options not supported"); }
         if (edges_only) { FATAL("-e and -r are mutually exclusive"); }
-        raw_instr_output = 1;
+        raw_instr_output = true;
         break;
 
       case 'h':
@@ -971,6 +1129,11 @@ int main(int argc, char **argv_orig, char **envp) {
   if (unicorn_mode && !mem_limit_given) { fsrv->mem_limit = MEM_LIMIT_UNICORN; }
 
   check_environment_vars(envp);
+
+  if (getenv("AFL_NO_FORKSRV")) {             /* if set, use the fauxserver */
+    fsrv->use_fauxsrv = true;
+
+  }
 
   if (getenv("AFL_DEBUG")) {
 
@@ -1042,18 +1205,25 @@ int main(int argc, char **argv_orig, char **envp) {
 
     }
 
+  } else if (fsrv->cs_mode) {
+
+    use_argv =
+        get_cs_argv(argv[0], &fsrv->target_path, argc - optind, argv + optind);
+
   } else {
 
     use_argv = argv + optind;
 
   }
 
+  if (in_dir) { (void)check_binary_signatures(fsrv->target_path); }
+
   shm_fuzz = ck_alloc(sizeof(sharedmem_t));
 
   /* initialize cmplog_mode */
   shm_fuzz->cmplog_mode = 0;
   u8 *map = afl_shm_init(shm_fuzz, MAX_FILE + sizeof(u32), 1);
-  shm_fuzz->shmemfuzz_mode = 1;
+  shm_fuzz->shmemfuzz_mode = true;
   if (!map) { FATAL("BUG: Zero return from afl_shm_init."); }
 #ifdef USEMMAP
   setenv(SHM_FUZZ_ENV_VAR, shm_fuzz->g_shm_file_path, 1);
@@ -1062,11 +1232,11 @@ int main(int argc, char **argv_orig, char **envp) {
   setenv(SHM_FUZZ_ENV_VAR, shm_str, 1);
   ck_free(shm_str);
 #endif
-  fsrv->support_shmem_fuzz = 1;
+  fsrv->support_shmem_fuzz = true;
   fsrv->shmem_fuzz_len = (u32 *)map;
   fsrv->shmem_fuzz = map + sizeof(u32);
 
-  if (!fsrv->qemu_mode && !unicorn_mode) {
+  if (!fsrv->cs_mode && !fsrv->qemu_mode && !unicorn_mode) {
 
     u32 save_be_quiet = be_quiet;
     be_quiet = !debug;
@@ -1078,6 +1248,9 @@ int main(int argc, char **argv_orig, char **envp) {
                                  ? 1
                                  : 0);
     be_quiet = save_be_quiet;
+
+    fsrv->kill_signal =
+        parse_afl_kill_signal_env(getenv("AFL_KILL_SIGNAL"), SIGKILL);
 
     if (new_map_size) {
 
@@ -1105,16 +1278,9 @@ int main(int argc, char **argv_orig, char **envp) {
 
   if (in_dir) {
 
-    DIR *          dir_in, *dir_out = NULL;
-    struct dirent *dir_ent;
-    //    int            done = 0;
-    u8 infile[PATH_MAX], outfile[PATH_MAX];
-    u8 wait_for_gdb = 0;
-#if !defined(DT_REG)
-    struct stat statbuf;
-#endif
+    DIR *dir_in, *dir_out = NULL;
 
-    if (getenv("AFL_DEBUG_GDB")) wait_for_gdb = 1;
+    if (getenv("AFL_DEBUG_GDB")) wait_for_gdb = true;
 
     fsrv->dev_null_fd = open("/dev/null", O_RDWR);
     if (fsrv->dev_null_fd < 0) { PFATAL("Unable to open /dev/null"); }
@@ -1131,12 +1297,6 @@ int main(int argc, char **argv_orig, char **envp) {
       ck_free(dn);
     if (!be_quiet) ACTF("Reading from directory '%s'...", in_dir);
 
-    if (!(dir_in = opendir(in_dir))) {
-
-      PFATAL("cannot open directory %s", in_dir);
-
-    }
-
     if (!collect_coverage) {
 
       if (!(dir_out = opendir(out_file))) {
@@ -1151,10 +1311,10 @@ int main(int argc, char **argv_orig, char **envp) {
 
     } else {
 
-      if ((coverage_map = (u8 *)malloc(map_size)) == NULL)
+      if ((coverage_map = (u8 *)malloc(map_size + 64)) == NULL)
         FATAL("coult not grab memory");
-      edges_only = 0;
-      raw_instr_output = 1;
+      edges_only = false;
+      raw_instr_output = true;
 
     }
 
@@ -1191,9 +1351,6 @@ int main(int argc, char **argv_orig, char **envp) {
 
     }
 
-    fsrv->kill_signal =
-        parse_afl_kill_signal_env(getenv("AFL_KILL_SIGNAL"), SIGKILL);
-
     if (getenv("AFL_CRASH_EXITCODE")) {
 
       long exitcode = strtol(getenv("AFL_CRASH_EXITCODE"), NULL, 10);
@@ -1222,56 +1379,14 @@ int main(int argc, char **argv_orig, char **envp) {
     if (fsrv->support_shmem_fuzz && !fsrv->use_shmem_fuzz)
       shm_fuzz = deinit_shmem(fsrv, shm_fuzz);
 
-    while ((dir_ent = readdir(dir_in))) {
+    if (execute_testcases(in_dir) == 0) {
 
-      if (dir_ent->d_name[0] == '.') {
-
-        continue;  // skip anything that starts with '.'
-
-      }
-
-#if defined(DT_REG)      /* Posix and Solaris do not know d_type and DT_REG */
-      if (dir_ent->d_type != DT_REG) {
-
-        continue;  // only regular files
-
-      }
-
-#endif
-
-      snprintf(infile, sizeof(infile), "%s/%s", in_dir, dir_ent->d_name);
-
-#if !defined(DT_REG)                                          /* use stat() */
-      if (-1 == stat(infile, &statbuf) || !S_ISREG(statbuf.st_mode)) continue;
-#endif
-
-      if (!collect_coverage)
-        snprintf(outfile, sizeof(outfile), "%s/%s", out_file, dir_ent->d_name);
-
-      if (read_file(infile)) {
-
-        if (wait_for_gdb) {
-
-          fprintf(stderr, "exec: gdb -p %d\n", fsrv->child_pid);
-          fprintf(stderr, "exec: kill -CONT %d\n", getpid());
-          kill(0, SIGSTOP);
-
-        }
-
-        showmap_run_target_forkserver(fsrv, in_data, in_len);
-        ck_free(in_data);
-        if (collect_coverage)
-          analyze_results(fsrv);
-        else
-          tcnt = write_results_to_file(fsrv, outfile);
-
-      }
+      FATAL("could not read input testcases from %s", in_dir);
 
     }
 
     if (!quiet_mode) { OKF("Processed %llu input files.", fsrv->total_execs); }
 
-    closedir(dir_in);
     if (dir_out) { closedir(dir_out); }
 
     if (collect_coverage) {
@@ -1300,9 +1415,9 @@ int main(int argc, char **argv_orig, char **envp) {
   if (!quiet_mode || collect_coverage) {
 
     if (!tcnt && !have_coverage) { FATAL("No instrumentation detected" cRST); }
-    OKF("Captured %u tuples (highest value %u, total values %llu) in "
-        "'%s'." cRST,
-        tcnt, highest, total, out_file);
+    OKF("Captured %u tuples (map size %u, highest value %u, total values %llu) "
+        "in '%s'." cRST,
+        tcnt, fsrv->real_map_size, highest, total, out_file);
     if (collect_coverage)
       OKF("A coverage of %u edges were achieved out of %u existing (%.02f%%) "
           "with %llu input files.",
